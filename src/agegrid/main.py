@@ -1,4 +1,5 @@
 from src.agegrid.env.agegrid_env import AgeGridEnv
+"""
 
 
 def main():
@@ -34,6 +35,16 @@ def main():
 
     print("\nFinal:")
     print(env.summary())
+
+
+if __name__ == "__main__":
+    main()
+"""
+from src.agegrid.ui.pygame_viewer import run_viewer
+
+
+def main():
+    run_viewer()
 
 
 if __name__ == "__main__":

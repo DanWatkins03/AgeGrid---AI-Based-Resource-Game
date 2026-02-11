@@ -6,6 +6,7 @@ matplotlib==3.10.8
 numpy==2.4.1
 packaging==26.0
 pillow==12.1.0
+pygame==2.6.1
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3

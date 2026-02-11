@@ -13,7 +13,11 @@ Position = Tuple[int, int]
 class GameConfig:
     width: int = 12
     height: int = 12
+    # Game turn configs
     max_turns: int = 200
+    actions_per_turn: int = 3
+    # Designed to punish agents for randomly guessing 
+    max_attempts_per_turn: int = 10 
     base_hp: int = 30
     starting_resources: int = 30
     num_resource_nodes: int = 8
@@ -27,8 +31,14 @@ class AgeGridEnv:
         self.config = config or GameConfig()
         self.rng = random.Random(self.config.seed)
 
+        # Turn actions
         self.turn: int = 0
+        self.actions_left: int = 0
+        self.attempts_left: int = 0
+
         self.current_player: int = 0
+
+        # Later can be facitons such as vikings, raiders etc.
         self.factions: Tuple[str, str] = ("Red", "Blue")
 
         self.bases: Dict[str, Base] = {}
@@ -39,7 +49,7 @@ class AgeGridEnv:
 
         self.reset()
 
-    # ---------- Setup ----------
+    # Game setup
 
     def reset(self) -> None:
         self.turn = 0
@@ -61,11 +71,14 @@ class AgeGridEnv:
         self._spawn_worker("Red", (2, 1))
         self._spawn_worker("Blue", (self.config.width - 3, self.config.height - 2))
 
+        self.actions_left = self.config.actions_per_turn
+        self.attempts_left = self.config.max_attempts_per_turn
+
     def _spawn_worker(self, faction: str, pos: Position) -> None:
         self.units.append(Unit(self._next_unit_id, faction, "worker", 5, pos))
         self._next_unit_id += 1
 
-    # ---------- Helpers ----------
+    # Game Helpers
 
     def _in_bounds(self, pos: Position) -> bool:
         x, y = pos
@@ -133,7 +146,7 @@ class AgeGridEnv:
             "right": (1, 0),
         }[direction]
 
-    # ---------- Actions ----------
+    # Game actions
 
     def move_unit(self, unit_id: int, direction: str) -> bool:
         unit = next((u for u in self.units if u.id == unit_id), None)
@@ -183,7 +196,97 @@ class AgeGridEnv:
         self.bank[unit.faction] += amount
         return True
 
-    # ---------- Turn + Display ----------
+    def resource_at(self, pos: Position) -> ResourceNode | None:
+        return self._resource_at(pos)
+
+
+    # Game turn + display
+
+    def start_faction_turn(self) -> None:
+        """Reset counters for the currently active faction."""
+        self.actions_left = self.config.actions_per_turn
+        self.attempts_left = self.config.max_attempts_per_turn
+
+    def _current_faction(self) -> str:
+        return self.factions[self.current_player]
+
+    def apply_action(self, action: tuple) -> tuple[bool, str]:
+        """
+        Apply one action for the current faction.
+        Valid action -> consumes 1 action point.
+        Invalid action -> consumes 1 attempt (but not an action point).
+        Returns (success, reason).
+        """
+        if self.attempts_left <= 0:
+            return False, "no_attempts"
+        if self.actions_left <= 0:
+            return False, "no_actions"
+
+        # every proposal costs an attempt
+        self.attempts_left -= 1
+
+        faction = self._current_faction()
+
+        if not isinstance(action, tuple) or len(action) == 0:
+            return False, "bad_action"
+
+        kind = action[0]
+
+        if kind == "gather":
+            if len(action) != 2:
+                return False, "bad_args"
+            unit_id = action[1]
+            unit = next((u for u in self.units if u.id == unit_id), None)
+            if unit is None or unit.faction != faction:
+                return False, "not_your_unit"
+
+            ok = self.gather(unit_id)
+            if ok:
+                self.actions_left -= 1
+                return True, "gather"
+            return False, "gather_failed"
+
+        if kind == "move_towards":
+            if len(action) != 3:
+                return False, "bad_args"
+            unit_id = action[1]
+            target = action[2]
+            unit = next((u for u in self.units if u.id == unit_id), None)
+            if unit is None or unit.faction != faction:
+                return False, "not_your_unit"
+
+            ok = self.move_towards(unit_id, target)
+            if ok:
+                self.actions_left -= 1
+                return True, "move"
+            return False, "move_blocked"
+
+        return False, "unknown_action"
+
+    def step_faction(self, decide_action) -> list[str]:
+        """
+        Run the current faction until it spends all actions OR runs out of attempts.
+        decide_action(env) -> action tuple OR None to stop early.
+        Returns a log of reasons (useful for UI).
+        """
+        self.start_faction_turn()
+        log: list[str] = []
+
+        while self.actions_left > 0 and self.attempts_left > 0:
+            action = decide_action(self)
+            if action is None:
+                log.append("stop")
+                break
+
+            ok, reason = self.apply_action(action)
+            log.append(reason if ok else f"invalid:{reason}")
+
+        if self.attempts_left == 0 and self.actions_left > 0:
+            log.append("turn_end:no_attempts")
+
+        return log
+
+
 
     def step_end_turn(self) -> None:
         self.current_player = 1 - self.current_player
