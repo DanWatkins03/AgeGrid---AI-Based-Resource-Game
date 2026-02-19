@@ -6,6 +6,8 @@ import random
 
 from src.agegrid.env.entities import Base, ResourceNode, Unit
 
+from src.agegrid.env.systems import movement, economy, mapgen
+
 Position = Tuple[int, int]
 
 
@@ -16,14 +18,19 @@ class GameConfig:
     # Game turn configs
     max_turns: int = 200
     actions_per_turn: int = 3
-    # Designed to punish agents for randomly guessing 
+    # Designed to limit agents from randomly guessing
     max_attempts_per_turn: int = 10 
+
     base_hp: int = 30
     starting_resources: int = 30
     num_resource_nodes: int = 8
     resource_per_node: int = 60
     worker_gather_amount: int = 5
     seed: int = 42
+
+    # Multiple workers
+    worker_spawn_cost: int = 20
+    max_workers: int = 10
 
 
 class AgeGridEnv:
@@ -62,7 +69,9 @@ class AgeGridEnv:
         }
 
         self.bank = {f: self.config.starting_resources for f in self.factions}
-        self.resources = self._place_symmetric_resources(
+
+        self.resources = mapgen.place_symmetric_resources(
+            self,
             self.config.num_resource_nodes,
             self.config.resource_per_node,
         )
@@ -88,44 +97,6 @@ class AgeGridEnv:
         x, y = pos
         return (self.config.width - 1 - x, self.config.height - 1 - y)
     
-    def _place_symmetric_resources(self, n: int, remaining: int) -> List[ResourceNode]:
-        # Ensure even number for symmetry
-        if n % 2 == 1:
-            n += 1
-
-        forbidden = {self.bases["Red"].position, self.bases["Blue"].position}
-        used: set[Position] = set(forbidden)
-
-        resources: List[ResourceNode] = []
-        rid = 1
-        attempts = 0
-
-        while len(resources) < n and attempts < 10_000:
-            attempts += 1
-
-            # Sample only from left half to avoid duplicates
-            x = self.rng.randint(0, self.config.width // 2 - 1)
-            y = self.rng.randint(0, self.config.height - 1)
-
-            p1 = (x, y)
-            p2 = self._mirror(p1)
-
-            if p1 in used or p2 in used or p1 == p2:
-                continue
-
-            used.add(p1)
-            used.add(p2)
-
-            resources.append(ResourceNode(id=rid, position=p1, remaining=remaining))
-            rid += 1
-            resources.append(ResourceNode(id=rid, position=p2, remaining=remaining))
-            rid += 1
-
-        if len(resources) < n:
-            raise RuntimeError("Failed to place symmetric resources. Try a different seed/config.")
-
-        return resources
-
 
     def _occupied_positions(self) -> set[Position]:
         occ = {b.position for b in self.bases.values()}
@@ -147,54 +118,14 @@ class AgeGridEnv:
         }[direction]
 
     # Game actions
-
     def move_unit(self, unit_id: int, direction: str) -> bool:
-        unit = next((u for u in self.units if u.id == unit_id), None)
-        if not unit:
-            return False
-
-        dx, dy = self._delta(direction)
-        new_pos = (unit.position[0] + dx, unit.position[1] + dy)
-
-        if not self._in_bounds(new_pos):
-            return False
-        if new_pos in self._occupied_positions():
-            return False
-
-        unit.position = new_pos
-        return True
+        return movement.move_unit(self, unit_id, direction)
 
     def move_towards(self, unit_id: int, target: Position) -> bool:
-        unit = next((u for u in self.units if u.id == unit_id), None)
-        if not unit:
-            return False
-
-        x, y = unit.position
-        tx, ty = target
-
-        if tx > x and self.move_unit(unit_id, "right"):
-            return True
-        if tx < x and self.move_unit(unit_id, "left"):
-            return True
-        if ty > y and self.move_unit(unit_id, "down"):
-            return True
-        if ty < y and self.move_unit(unit_id, "up"):
-            return True
-        return False
-
+        return movement.move_towards(self, unit_id, target)
+    
     def gather(self, worker_id: int) -> bool:
-        unit = next((u for u in self.units if u.id == worker_id), None)
-        if not unit or unit.unit_type != "worker":
-            return False
-
-        node = self._resource_at(unit.position)
-        if not node:
-            return False
-
-        amount = min(self.config.worker_gather_amount, node.remaining)
-        node.remaining -= amount
-        self.bank[unit.faction] += amount
-        return True
+        return economy.gather(self, worker_id)
 
     def resource_at(self, pos: Position) -> ResourceNode | None:
         return self._resource_at(pos)
@@ -245,6 +176,16 @@ class AgeGridEnv:
                 self.actions_left -= 1
                 return True, "gather"
             return False, "gather_failed"
+        
+        if kind == "spawn_worker":
+            if len(action) !=1:
+                return False, "bad_args"
+            
+            ok = economy.spawn_worker(self, faction)
+            if ok:
+                self.actions_left -=1
+                return True, "spawn_worker"
+            return False, "spawn_failed"
 
         if kind == "move_towards":
             if len(action) != 3:
@@ -262,6 +203,8 @@ class AgeGridEnv:
             return False, "move_blocked"
 
         return False, "unknown_action"
+    
+        
 
     def step_faction(self, decide_action) -> list[str]:
         """

@@ -30,6 +30,11 @@ def _decide_action(env: AgeGridEnv) -> tuple | None:
     workers = [u for u in env.units if u.faction == faction and u.unit_type == "worker"]
     if not workers:
         return None
+    
+    # Spawn a secound worker when we can afford it
+    if len(workers) == 1 and env.bank[faction] >= env.config.worker_spawn_cost:
+        return ("spawn_worker",)
+
     w = workers[0]
 
     # If standing on a resource, gather
@@ -66,7 +71,7 @@ def run_viewer() -> None:
 
     tile = 48
     pad = 16
-    top_bar = 90
+    top_bar = 125
 
     width_px = pad * 2 + env.config.width * tile
     height_px = pad * 2 + top_bar + env.config.height * tile
@@ -100,25 +105,46 @@ def run_viewer() -> None:
                 if btn_rect.collidepoint(event.pos):
                     last_red, last_blue = _step_full_turn(env)
 
-        # ---------- Draw ----------
+        # Draw 
         screen.fill((22, 22, 22))
 
-        # Top info bar
-        title = big.render(
-        f"Turn {env.turn} | Current: {env.factions[env.current_player]} | "
-        f"Red bank: {env.bank['Red']} | Blue bank: {env.bank['Blue']} | "
-        f"Actions left: {env.actions_left} | Attempts left: {env.attempts_left}",
-        True,
-        (240, 240, 240),
+        # --- Top info bar ---
+
+        red_workers = sum(1 for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        blue_workers = sum(1 for u in env.units if u.faction == "Blue" and u.unit_type == "worker")
+        spawn_cost = env.config.worker_spawn_cost
+
+        # Line 1 – turn info
+        line1 = big.render(
+            f"Turn {env.turn} | Current: {env.factions[env.current_player]}",
+            True,
+            (240, 240, 240),
         )
+        screen.blit(line1, (pad, pad))
 
-        screen.blit(title, (pad, pad))
+        # Line 2 – banks + workers
+        line2 = font.render(
+            f"Red: {env.bank['Red']} ({red_workers} workers)   |   "
+            f"Blue: {env.bank['Blue']} ({blue_workers} workers)",
+            True,
+            (210, 210, 210),
+        )
+        screen.blit(line2, (pad, pad + 32))
 
-        # Last actions
-        lr = font.render(f"Red actions: {', '.join(last_red) if last_red else '-'}", True, (210, 210, 210))
-        lb = font.render(f"Blue actions: {', '.join(last_blue) if last_blue else '-'}", True, (210, 210, 210))
-        screen.blit(lr, (pad, pad + 34))
-        screen.blit(lb, (pad, pad + 58))
+        # Line 3 – turn mechanics
+        line3 = font.render(
+            f"Spawn cost: {spawn_cost}   |   "
+            f"Actions left: {env.actions_left}   Attempts left: {env.attempts_left}",
+            True,
+            (210, 210, 210),
+        )
+        screen.blit(line3, (pad, pad + 58))
+
+        # Last actions (shifted down slightly)
+        lr = font.render(f"Red actions: {', '.join(last_red) if last_red else '-'}", True, (200, 200, 200))
+        lb = font.render(f"Blue actions: {', '.join(last_blue) if last_blue else '-'}", True, (200, 200, 200))
+        screen.blit(lr, (pad, pad + 84))
+        screen.blit(lb, (pad, pad + 106))
 
         # Button
         pygame.draw.rect(screen, (60, 60, 60), btn_rect, border_radius=8)
