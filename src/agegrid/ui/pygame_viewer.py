@@ -1,70 +1,25 @@
 from __future__ import annotations
-
 import pygame
-from typing import Tuple
 
 from src.agegrid.env.agegrid_env import AgeGridEnv
-
-Position = Tuple[int, int]
-
-
-def _nearest_resource_pos(env: AgeGridEnv, pos: Position) -> Position | None:
-    # only consider non-empty nodes
-    nodes = [r for r in env.resources if r.remaining > 0]
-    if not nodes:
-        return None
-
-    def dist(p: Position) -> int:
-        return abs(p[0] - pos[0]) + abs(p[1] - pos[1])
-
-    return min(nodes, key=lambda r: dist(r.position)).position
+from src.agegrid.agents.greedy import GreedyAgent
 
 
-def _decide_action(env: AgeGridEnv) -> tuple | None:
-    """
-    Decide ONE action for the env's current faction.
-    Returns an action tuple or None to stop early.
-    """
-    faction = env.factions[env.current_player]
+def _step_full_turn(env: AgeGridEnv, red_agent, blue_agent) -> tuple[list[str], list[str]]:
+    red_log = env.step_faction(lambda e: red_agent.act(e))
+    env.step_end_turn()
 
-    workers = [u for u in env.units if u.faction == faction and u.unit_type == "worker"]
-    if not workers:
-        return None
-    
-    # Spawn a secound worker when we can afford it
-    if len(workers) == 1 and env.bank[faction] >= env.config.worker_spawn_cost:
-        return ("spawn_worker",)
-
-    w = workers[0]
-
-    # If standing on a resource, gather
-    if env._resource_at(w.position) is not None:
-        return ("gather", w.id)
-
-    # Otherwise move towards nearest resource
-    target = _nearest_resource_pos(env, w.position)
-    if target is None:
-        return None
-
-    return ("move_towards", w.id, target)
-
-
-
-def _step_full_turn(env: AgeGridEnv) -> tuple[list[str], list[str]]:
-    # Red acts (current_player should be 0 / Red)
-    red_log = env.step_faction(_decide_action)
-    env.step_end_turn()  # switch to Blue
-
-    # Blue acts
-    blue_log = env.step_faction(_decide_action)
-    env.step_end_turn()  # switch back to Red, increments env.turn
+    blue_log = env.step_faction(lambda e: blue_agent.act(e))
+    env.step_end_turn()
 
     return red_log, blue_log
 
 
-
 def run_viewer() -> None:
     env = AgeGridEnv()
+
+    red_agent = GreedyAgent(desired_workers=2)
+    blue_agent = GreedyAgent(desired_workers=2)
 
     pygame.init()
     pygame.display.set_caption("AgeGrid Viewer (v1)")
@@ -79,6 +34,7 @@ def run_viewer() -> None:
     screen = pygame.display.set_mode((width_px, height_px))
     clock = pygame.time.Clock()
 
+
     font = pygame.font.SysFont(None, 24)
     big = pygame.font.SysFont(None, 28)
 
@@ -86,8 +42,7 @@ def run_viewer() -> None:
     btn_w, btn_h = 140, 36
     btn_rect = pygame.Rect(width_px - pad - btn_w, pad, btn_w, btn_h)
 
-    last_red: list[str] = []
-    last_blue: list[str] = []
+    last_red, last_blue = _step_full_turn(env, red_agent, blue_agent)
 
     running = True
     while running:
@@ -99,16 +54,15 @@ def run_viewer() -> None:
 
             if event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_SPACE, pygame.K_RETURN):
-                    last_red, last_blue = _step_full_turn(env)
+                    last_red, last_blue = _step_full_turn(env, red_agent, blue_agent)
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if btn_rect.collidepoint(event.pos):
-                    last_red, last_blue = _step_full_turn(env)
-
+                    last_red, last_blue = _step_full_turn(env, red_agent, blue_agent)   
         # Draw 
         screen.fill((22, 22, 22))
 
-        # --- Top info bar ---
+        # Top info bar 
 
         red_workers = sum(1 for u in env.units if u.faction == "Red" and u.unit_type == "worker")
         blue_workers = sum(1 for u in env.units if u.faction == "Blue" and u.unit_type == "worker")
@@ -140,7 +94,7 @@ def run_viewer() -> None:
         )
         screen.blit(line3, (pad, pad + 58))
 
-        # Last actions (shifted down slightly)
+        # Last actions 
         lr = font.render(f"Red actions: {', '.join(last_red) if last_red else '-'}", True, (200, 200, 200))
         lb = font.render(f"Blue actions: {', '.join(last_blue) if last_blue else '-'}", True, (200, 200, 200))
         screen.blit(lr, (pad, pad + 84))
