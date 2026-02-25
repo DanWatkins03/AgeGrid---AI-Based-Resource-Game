@@ -90,7 +90,7 @@ This project also serves as a sandbox for experimenting with AI systems architec
 
 ---
 
-## 🛠 Status
+## Status
 
 Active development. 
 Core simulation loop and modular architecture established. 
