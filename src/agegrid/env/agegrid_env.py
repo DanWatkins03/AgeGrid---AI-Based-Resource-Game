@@ -32,6 +32,10 @@ class GameConfig:
     worker_spawn_cost: int = 20
     max_workers: int = 10
 
+    # Win Conditions
+    # Eventually add more like money win, combat win etc.
+    target_bank: int = 200 # Temp resource win
+
 
 class AgeGridEnv:
     def __init__(self, config: GameConfig | None = None):
@@ -230,11 +234,17 @@ class AgeGridEnv:
         return log
 
 
-
     def step_end_turn(self) -> None:
         self.current_player = 1 - self.current_player
         if self.current_player == 0:
             self.turn += 1
+
+    # Eventually add more win conditions other than resource
+    def winner(self) -> str | None:
+        if self.bank["Red"] >= self.config.target_bank:
+            return "Red"
+        if self.bank["Blue"] >= self.config.target_bank:
+            return "Blue"
 
     def summary(self) -> str:
         lines = [
