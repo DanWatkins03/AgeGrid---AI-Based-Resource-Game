@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 
+def _distance(a: tuple[int, int], b: tuple[int, int]) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _structure_target_priority(structure_pos: tuple[int, int], unit) -> tuple[int, int, int]:
+    threat_rank = 0 if unit.attack_damage > 0 else 1
+    return (threat_rank, unit.hp, _distance(structure_pos, unit.position))
+
+
 def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
     attacker = next((u for u in env.units if u.id == attacker_id), None)
     target = next((u for u in env.units if u.id == target_id), None)
@@ -42,3 +51,54 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
 
     target_base.hp = max(0, target_base.hp - attacker.attack_damage)
     return True
+
+
+def _base_attack_stats(env, faction: str) -> tuple[int, int]:
+    state = env.faction_state(faction)
+    damage = env.config.base_attack_damage
+    attack_range = env.config.base_attack_range
+    if "masonry" in state.techs_unlocked:
+        damage += env.config.masonry_base_attack_bonus
+    return damage, attack_range
+
+
+def resolve_defensive_fire(env, faction: str) -> list[str]:
+    events: list[str] = []
+    enemy_units = [u for u in env.units if u.faction != faction]
+    if not enemy_units:
+        return events
+
+    base = env.bases[faction]
+    if base.hp > 0:
+        base_damage, base_range = _base_attack_stats(env, faction)
+        targets = [unit for unit in enemy_units if _distance(base.position, unit.position) <= base_range]
+        if targets:
+            target = min(targets, key=lambda unit: _structure_target_priority(base.position, unit))
+            target.hp -= base_damage
+            if target.hp <= 0:
+                env._remove_unit(target.id)
+                events.append(f"{faction} base shot down {target.faction} {target.unit_type}#{target.id}")
+            else:
+                events.append(f"{faction} base hit {target.faction} {target.unit_type}#{target.id} ({target.hp} hp left)")
+
+    for building in env.buildings:
+        if building.faction != faction or building.hp <= 0 or building.attack_damage <= 0 or building.attack_range <= 0:
+            continue
+        current_targets = [
+            unit for unit in env.units if unit.faction != faction and _distance(building.position, unit.position) <= building.attack_range
+        ]
+        if not current_targets:
+            continue
+        target = min(current_targets, key=lambda unit: _structure_target_priority(building.position, unit))
+        target.hp -= building.attack_damage
+        if target.hp <= 0:
+            env._remove_unit(target.id)
+            events.append(
+                f"{faction} {building.building_type} shot down {target.faction} {target.unit_type}#{target.id}"
+            )
+        else:
+            events.append(
+                f"{faction} {building.building_type} hit {target.faction} {target.unit_type}#{target.id} ({target.hp} hp left)"
+            )
+
+    return events

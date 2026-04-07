@@ -12,7 +12,7 @@ def gather(env, worker_id: int) -> bool:
     if unit is None or unit.unit_type != "worker":
         return False
 
-    node = env._resource_at(unit.position)
+    node = env.resource_at_for_faction(unit.position, unit.faction)
     if node is None:
         return False
 

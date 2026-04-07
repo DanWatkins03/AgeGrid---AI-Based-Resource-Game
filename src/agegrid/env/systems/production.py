@@ -11,6 +11,7 @@ class UnitDefinition:
     hp: int
     attack_damage: int = 0
     attack_range: int = 0
+    move_steps: int = 1
     required_tech: str | None = None
     required_building: str | None = None
 
@@ -24,12 +25,13 @@ class BuildingDefinition:
     required_tech: str | None = None
     required_building: str | None = None
     resource_income: int = 0
+    required_resource_adjacent: str | None = None
 
 
 UNIT_DEFS: dict[str, UnitDefinition] = {
     "worker": UnitDefinition(cost=20, hp=5),
     "soldier": UnitDefinition(
-        cost=35,
+        cost=30,
         hp=10,
         attack_damage=3,
         attack_range=1,
@@ -37,19 +39,48 @@ UNIT_DEFS: dict[str, UnitDefinition] = {
         required_building="barracks",
     ),
     "archer": UnitDefinition(
-        cost=45,
+        cost=36,
         hp=8,
-        attack_damage=2,
+        attack_damage=3,
         attack_range=3,
         required_tech="fletching",
         required_building="barracks",
     ),
+    "horseman": UnitDefinition(
+        cost=34,
+        hp=12,
+        attack_damage=4,
+        attack_range=1,
+        move_steps=3,
+        required_tech="horsemanship",
+        required_building="stable",
+    ),
 }
 
 BUILDING_DEFS: dict[str, BuildingDefinition] = {
-    "storehouse": BuildingDefinition(cost=45, hp=18, required_tech="mining", resource_income=2),
-    "barracks": BuildingDefinition(cost=60, hp=30, required_tech="bronze_working"),
-    "turret": BuildingDefinition(cost=50, hp=20, attack_damage=2, attack_range=2, required_tech="masonry"),
+    "storehouse": BuildingDefinition(cost=36, hp=18, required_tech="mining", resource_income=3),
+    "barracks": BuildingDefinition(cost=48, hp=30, required_tech="bronze_working"),
+    "quarry": BuildingDefinition(
+        cost=34,
+        hp=20,
+        required_tech="mining",
+        required_resource_adjacent="stone",
+        resource_income=4,
+    ),
+    "stable": BuildingDefinition(
+        cost=36,
+        hp=24,
+        required_tech="horsemanship",
+        required_resource_adjacent="horses",
+    ),
+    "turret": BuildingDefinition(
+        cost=42,
+        hp=22,
+        attack_damage=3,
+        attack_range=3,
+        required_tech="masonry",
+        required_building="quarry",
+    ),
 }
 
 
@@ -114,6 +145,7 @@ def train_unit(env, faction: str, unit_type: str) -> bool:
                 pos=pos,
                 attack_damage=spec.attack_damage,
                 attack_range=spec.attack_range,
+                move_steps=spec.move_steps,
             )
             return True
     return False
@@ -140,6 +172,18 @@ def can_build(env, faction: str, worker_id: int, building_type: str, pos: Positi
         return False
     if not env._in_bounds(pos) or pos in env._occupied_positions() or pos in {b.position for b in env.buildings}:
         return False
+    if spec.required_resource_adjacent is not None:
+        adjacent_resources = [
+            env.resource_at_for_faction((pos[0] + 1, pos[1]), faction),
+            env.resource_at_for_faction((pos[0] - 1, pos[1]), faction),
+            env.resource_at_for_faction((pos[0], pos[1] + 1), faction),
+            env.resource_at_for_faction((pos[0], pos[1] - 1), faction),
+        ]
+        if not any(
+            resource is not None and resource.resource_type == spec.required_resource_adjacent
+            for resource in adjacent_resources
+        ):
+            return False
     return True
 
 

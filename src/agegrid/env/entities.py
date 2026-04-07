@@ -12,6 +12,8 @@ class ResourceNode:
     id: int
     position: Position
     remaining: int
+    resource_type: str = "ore"
+    required_tech: str | None = None
 
 
 @dataclass
@@ -23,6 +25,7 @@ class Unit:
     position: Position
     attack_damage: int = 0
     attack_range: int = 0
+    move_steps: int = 1
 
 
 @dataclass

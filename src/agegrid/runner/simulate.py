@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from src.agegrid.agents.registry import create_agent
 from src.agegrid.env.agegrid_env import AgeGridEnv
-from src.agegrid.agents.heuristic import HeuristicAgent
-from src.agegrid.agents.random import RandomAgent
 
 
 @dataclass
@@ -15,6 +14,21 @@ class EpisodeResult:
     red_bank: int
     blue_bank: int
     ended_by: str  # "target_bank" or "max_turns"
+
+
+@dataclass
+class MatchupSummary:
+    red_agent: str
+    blue_agent: str
+    episodes: int
+    red_wins: int
+    blue_wins: int
+    draws: int
+    ended_target: int
+    ended_max: int
+    avg_turns: float
+    avg_red_bank: float
+    avg_blue_bank: float
 
 
 def run_episode(env: AgeGridEnv, red_agent, blue_agent) -> EpisodeResult:
@@ -68,27 +82,25 @@ def run_episode(env: AgeGridEnv, red_agent, blue_agent) -> EpisodeResult:
     )
 
 
-def main() -> None:
-    episodes = 50
-
+def run_matchup(red_key: str, blue_key: str, episodes: int = 20) -> MatchupSummary:
     red_wins = 0
     blue_wins = 0
     draws = 0
-
     ended_target = 0
     ended_max = 0
-
     total_turns = 0
+    total_red_bank = 0
+    total_blue_bank = 0
 
     for i in range(episodes):
         env = AgeGridEnv()
+        red_agent = create_agent(red_key, seed=i * 2)
+        blue_agent = create_agent(blue_key, seed=i * 2 + 1)
 
-        # Baseline comparison
-        red = HeuristicAgent(desired_workers=3)
-        blue = RandomAgent(seed=i)
-
-        result = run_episode(env, red, blue)
+        result = run_episode(env, red_agent, blue_agent)
         total_turns += result.turns
+        total_red_bank += result.red_bank
+        total_blue_bank += result.blue_bank
 
         if result.ended_by == "target_bank":
             ended_target += 1
@@ -102,11 +114,40 @@ def main() -> None:
         else:
             draws += 1
 
-    print(f"Episodes: {episodes}")
-    print(f"Win condition: first to target_bank={AgeGridEnv().config.target_bank} (else max_turns)")
-    print(f"Red wins: {red_wins} | Blue wins: {blue_wins} | Draws: {draws}")
-    print(f"Ended by target_bank: {ended_target} | Ended by max_turns: {ended_max}")
-    print(f"Avg turns: {total_turns / episodes:.1f}")
+    return MatchupSummary(
+        red_agent=red_key,
+        blue_agent=blue_key,
+        episodes=episodes,
+        red_wins=red_wins,
+        blue_wins=blue_wins,
+        draws=draws,
+        ended_target=ended_target,
+        ended_max=ended_max,
+        avg_turns=total_turns / episodes,
+        avg_red_bank=total_red_bank / episodes,
+        avg_blue_bank=total_blue_bank / episodes,
+    )
+
+
+def main() -> None:
+    matchups = [
+        ("heuristic", "random"),
+        ("heuristic", "greedy"),
+        ("greedy", "random"),
+    ]
+
+    config = AgeGridEnv().config
+    print(f"AgeGrid benchmark | target_bank={config.target_bank} | max_turns={config.max_turns}")
+
+    for red_key, blue_key in matchups:
+        summary = run_matchup(red_key, blue_key, episodes=20)
+        print(
+            f"{summary.red_agent} vs {summary.blue_agent} | "
+            f"wins {summary.red_wins}-{summary.blue_wins}-{summary.draws} | "
+            f"ended target/max {summary.ended_target}/{summary.ended_max} | "
+            f"avg turns {summary.avg_turns:.1f} | "
+            f"avg bank {summary.avg_red_bank:.1f}/{summary.avg_blue_bank:.1f}"
+        )
 
 
 if __name__ == "__main__":

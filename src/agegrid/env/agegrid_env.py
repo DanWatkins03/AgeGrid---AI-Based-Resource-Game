@@ -15,8 +15,8 @@ Position = Tuple[int, int]
 
 @dataclass
 class GameConfig:
-    width: int = 12
-    height: int = 12
+    width: int = 14
+    height: int = 14
     # Game turn configs
     max_turns: int = 200
     actions_per_turn: int = 3
@@ -24,9 +24,16 @@ class GameConfig:
     max_attempts_per_turn: int = 10 
 
     base_hp: int = 30
+    base_attack_damage: int = 2
+    base_attack_range: int = 2
+    masonry_base_attack_bonus: int = 1
     starting_resources: int = 30
     num_resource_nodes: int = 8
     resource_per_node: int = 60
+    stone_resource_nodes: int = 2
+    stone_resource_amount: int = 50
+    horse_resource_nodes: int = 2
+    horse_resource_amount: int = 50
     worker_gather_amount: int = 5
     seed: int = 42
 
@@ -62,6 +69,9 @@ class AgeGridEnv:
         self.bank = BankView(self.faction_states)
         self._next_unit_id: int = 1
         self._next_building_id: int = 1
+        self.current_events: list[str] = []
+        self.recent_events: list[str] = []
+        self.free_research_used: bool = False
 
         self.reset()
 
@@ -97,6 +107,9 @@ class AgeGridEnv:
 
         self.actions_left = self.config.actions_per_turn
         self.attempts_left = self.config.max_attempts_per_turn
+        self.current_events = []
+        self.recent_events = []
+        self.free_research_used = False
 
     def _spawn_unit(
         self,
@@ -106,8 +119,9 @@ class AgeGridEnv:
         pos: Position,
         attack_damage: int = 0,
         attack_range: int = 0,
+        move_steps: int = 1,
     ) -> None:
-        unit = Unit(self._next_unit_id, faction, unit_type, hp, pos, attack_damage, attack_range)
+        unit = Unit(self._next_unit_id, faction, unit_type, hp, pos, attack_damage, attack_range, move_steps)
         self.units.append(unit)
         self.faction_state(faction).unit_ids.append(unit.id)
         self._next_unit_id += 1
@@ -148,6 +162,11 @@ class AgeGridEnv:
 
     # Game Helpers
 
+    def _record_event(self, message: str) -> None:
+        self.current_events.append(message)
+        self.recent_events.append(message)
+        self.recent_events = self.recent_events[-12:]
+
     def faction_state(self, faction: str) -> FactionState:
         return self.faction_states[faction]
 
@@ -166,8 +185,10 @@ class AgeGridEnv:
         occ.update(u.position for u in self.units)
         return occ
 
-    def _resource_at(self, pos: Position) -> ResourceNode | None:
+    def _resource_at(self, pos: Position, faction: str | None = None) -> ResourceNode | None:
         for r in self.resources:
+            if faction is not None and r.required_tech is not None and r.required_tech not in self.faction_state(faction).techs_unlocked:
+                continue
             if r.position == pos and r.remaining > 0:
                 return r
         return None
@@ -193,6 +214,17 @@ class AgeGridEnv:
     def resource_at(self, pos: Position) -> ResourceNode | None:
         return self._resource_at(pos)
 
+    def resource_at_for_faction(self, pos: Position, faction: str) -> ResourceNode | None:
+        return self._resource_at(pos, faction)
+
+    def visible_resources(self, faction: str) -> list[ResourceNode]:
+        return [
+            resource
+            for resource in self.resources
+            if resource.remaining > 0
+            and (resource.required_tech is None or resource.required_tech in self.faction_state(faction).techs_unlocked)
+        ]
+
     def legal_actions(self, faction: str | None = None) -> list[Action]:
         faction = faction or self._current_faction()
         action_set: set[Action] = set()
@@ -202,13 +234,19 @@ class AgeGridEnv:
         combat_units = [u for u in units if u.attack_damage > 0]
         enemy_units = [u for u in self.units if u.faction != faction]
         enemy_base_positions = [base.position for name, base in self.bases.items() if name != faction]
+        friendly_guard_positions = [self.bases[faction].position]
+        friendly_guard_positions.extend(worker.position for worker in workers)
+        friendly_guard_positions.extend(unit.position for unit in combat_units)
+        friendly_guard_positions.extend(
+            building.position for building in self.buildings if building.faction == faction and building.hp > 0
+        )
 
         for worker in workers:
-            if self._resource_at(worker.position) is not None:
+            if self._resource_at(worker.position, faction) is not None:
                 action_set.add(("gather", worker.id))
 
-            for resource in self.resources:
-                if resource.remaining > 0 and worker.position != resource.position and movement.can_move_towards(self, worker.id, resource.position):
+            for resource in self.visible_resources(faction):
+                if worker.position != resource.position and movement.can_move_towards(self, worker.id, resource.position):
                     action_set.add(("move_towards", worker.id, resource.position))
 
             for pos in enemy_base_positions:
@@ -218,12 +256,15 @@ class AgeGridEnv:
             for enemy in enemy_units:
                 if movement.can_move_towards(self, worker.id, enemy.position):
                     action_set.add(("move_towards", worker.id, enemy.position))
+            for pos in friendly_guard_positions:
+                if pos != worker.position and movement.can_move_towards(self, worker.id, pos):
+                    action_set.add(("move_towards", worker.id, pos))
 
         if production.can_train_unit(self, faction, "worker"):
             action_set.add(("spawn_worker",))
 
         for tech_id in tech.TECH_DEFS:
-            if tech.can_research(self, faction, tech_id):
+            if not self.free_research_used and tech.can_research(self, faction, tech_id):
                 action_set.add(("research", tech_id))
 
         for unit_type in production.UNIT_DEFS:
@@ -243,6 +284,9 @@ class AgeGridEnv:
                     action_set.add(("move_towards", attacker.id, enemy.position))
             for pos in enemy_base_positions:
                 if movement.can_move_towards(self, attacker.id, pos):
+                    action_set.add(("move_towards", attacker.id, pos))
+            for pos in friendly_guard_positions:
+                if pos != attacker.position and movement.can_move_towards(self, attacker.id, pos):
                     action_set.add(("move_towards", attacker.id, pos))
 
             for target in self.units:
@@ -267,6 +311,8 @@ class AgeGridEnv:
         """Reset counters for the currently active faction."""
         self.actions_left = self.config.actions_per_turn
         self.attempts_left = self.config.max_attempts_per_turn
+        self.current_events = []
+        self.free_research_used = False
 
     def _current_faction(self) -> str:
         return self.factions[self.current_player]
@@ -304,6 +350,7 @@ class AgeGridEnv:
             ok = self.gather(unit_id)
             if ok:
                 self.actions_left -= 1
+                self._record_event(f"{faction} worker#{unit_id} gathered resources")
                 return True, "gather"
             return False, "gather_failed"
         
@@ -314,6 +361,8 @@ class AgeGridEnv:
             ok = production.spawn_worker(self, faction)
             if ok:
                 self.actions_left -=1
+                new_unit = max((u for u in self.units if u.faction == faction), key=lambda u: u.id)
+                self._record_event(f"{faction} spawned worker#{new_unit.id}")
                 return True, "spawn_worker"
             return False, "spawn_failed"
 
@@ -324,6 +373,8 @@ class AgeGridEnv:
             ok = production.train_unit(self, faction, action[1])
             if ok:
                 self.actions_left -= 1
+                new_unit = max((u for u in self.units if u.faction == faction), key=lambda u: u.id)
+                self._record_event(f"{faction} trained {action[1]}#{new_unit.id}")
                 return True, "train"
             return False, "train_failed"
 
@@ -340,36 +391,52 @@ class AgeGridEnv:
             ok = production.build(self, faction, worker_id, building_type, pos)
             if ok:
                 self.actions_left -= 1
+                self._record_event(f"{faction} built {building_type} at {pos}")
                 return True, "build"
             return False, "build_failed"
 
         if kind == "research":
             if len(action) != 2:
                 return False, "bad_args"
+            if self.free_research_used:
+                return False, "research_used"
 
             ok = tech.research(self, faction, action[1])
             if ok:
-                self.actions_left -= 1
+                self.free_research_used = True
+                self._record_event(f"{faction} researched {action[1]}")
                 return True, "research"
             return False, "research_failed"
 
         if kind == "attack":
             if len(action) != 3:
                 return False, "bad_args"
-
+            attacker_id = action[1]
+            target_id = action[2]
+            target = next((u for u in self.units if u.id == target_id), None)
             ok = combat.attack(self, faction, action[1], action[2])
             if ok:
                 self.actions_left -= 1
+                if target is not None and target.hp <= 0:
+                    self._record_event(f"{faction} unit#{attacker_id} defeated {target.faction} {target.unit_type}#{target_id}")
+                elif target is not None:
+                    self._record_event(f"{faction} unit#{attacker_id} hit {target.faction} {target.unit_type}#{target_id} ({target.hp} hp left)")
                 return True, "attack"
             return False, "attack_failed"
 
         if kind == "attack_base":
             if len(action) != 3:
                 return False, "bad_args"
-
-            ok = combat.attack_base(self, faction, action[1], action[2])
+            attacker_id = action[1]
+            target_faction = action[2]
+            ok = combat.attack_base(self, faction, attacker_id, target_faction)
             if ok:
                 self.actions_left -= 1
+                base_hp = self.bases[target_faction].hp
+                if base_hp == 0:
+                    self._record_event(f"{faction} unit#{attacker_id} destroyed the {target_faction} base")
+                else:
+                    self._record_event(f"{faction} unit#{attacker_id} hit the {target_faction} base ({base_hp} hp left)")
                 return True, "attack_base"
             return False, "attack_base_failed"
 
@@ -385,6 +452,7 @@ class AgeGridEnv:
             ok = self.move_towards(unit_id, target)
             if ok:
                 self.actions_left -= 1
+                self._record_event(f"{faction} unit#{unit_id} moved toward {target}")
                 return True, "move"
             return False, "move_blocked"
 
@@ -426,12 +494,26 @@ class AgeGridEnv:
 
     def step_end_turn(self) -> None:
         faction = self._current_faction()
+        for event in combat.resolve_defensive_fire(self, faction):
+            self._record_event(event)
+        if self.winner() is not None:
+            self.current_player = 1 - self.current_player
+            if self.current_player == 0:
+                self.turn += 1
+            return
+
+        completed_tech = tech.progress_research(self, faction)
+        if completed_tech is not None:
+            self._record_event(f"{faction} completed research: {completed_tech}")
+
         income = sum(
             production.BUILDING_DEFS[b.building_type].resource_income
             for b in self.buildings
             if b.faction == faction and b.hp > 0 and b.building_type in production.BUILDING_DEFS
         )
         self.faction_state(faction).resources += income
+        if income > 0:
+            self._record_event(f"{faction} gained {income} passive income")
 
         self.current_player = 1 - self.current_player
         if self.current_player == 0:

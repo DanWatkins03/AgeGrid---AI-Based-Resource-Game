@@ -62,17 +62,31 @@ def can_move_unit(env, unit_id: int, direction: str) -> bool:
 
 
 def can_move_towards(env, unit_id: int, target: Position) -> bool:
-    return _next_step_toward(env, unit_id, target) is not None
-
-
-def _next_step_toward(env, unit_id: int, target: Position) -> Position | None:
     unit = next((u for u in env.units if u.id == unit_id), None)
-    if unit is None or unit.position == target:
+    if unit is None:
+        return False
+    probe_position = unit.position
+    steps = max(1, getattr(unit, "move_steps", 1))
+
+    for _ in range(steps):
+        next_pos = _next_step_toward(env, unit_id, target, start=probe_position)
+        if next_pos is None:
+            return probe_position != unit.position
+        probe_position = next_pos
+        if probe_position == target:
+            return True
+    return probe_position != unit.position
+
+
+def _next_step_toward(env, unit_id: int, target: Position, start: Position | None = None) -> Position | None:
+    unit = next((u for u in env.units if u.id == unit_id), None)
+    current_position = unit.position if unit is not None and start is None else start
+    if unit is None or current_position is None or current_position == target:
         return None
 
     occupied = env._occupied_positions() - {unit.position}
-    queue: deque[Position] = deque([unit.position])
-    came_from: dict[Position, Position | None] = {unit.position: None}
+    queue: deque[Position] = deque([current_position])
+    came_from: dict[Position, Position | None] = {current_position: None}
 
     while queue:
         current = queue.popleft()
@@ -94,7 +108,7 @@ def _next_step_toward(env, unit_id: int, target: Position) -> Position | None:
         return None
 
     step = target
-    while came_from[step] != unit.position:
+    while came_from[step] != current_position:
         parent = came_from[step]
         if parent is None:
             return None
@@ -107,12 +121,16 @@ def move_towards(env, unit_id: int, target: Position) -> bool:
     if unit is None:
         return False
 
-    next_pos = _next_step_toward(env, unit_id, target)
-    if next_pos is None:
-        return False
-
-    unit.position = next_pos
-    return True
+    moved = False
+    for _ in range(max(1, getattr(unit, "move_steps", 1))):
+        next_pos = _next_step_toward(env, unit_id, target)
+        if next_pos is None:
+            break
+        unit.position = next_pos
+        moved = True
+        if unit.position == target:
+            break
+    return moved
 
 
 
