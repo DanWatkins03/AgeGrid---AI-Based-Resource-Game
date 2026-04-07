@@ -15,4 +15,5 @@ __pycache__/
 
 # Outputs
 results/
+agegrid_debug_snapshot.txt
 

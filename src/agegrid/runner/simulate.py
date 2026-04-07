@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.agegrid.env.agegrid_env import AgeGridEnv
-from src.agegrid.agents.greedy import GreedyAgent
+from src.agegrid.agents.heuristic import HeuristicAgent
 from src.agegrid.agents.random import RandomAgent
 
 
@@ -84,7 +84,7 @@ def main() -> None:
         env = AgeGridEnv()
 
         # Baseline comparison
-        red = GreedyAgent(desired_workers=2)
+        red = HeuristicAgent(desired_workers=3)
         blue = RandomAgent(seed=i)
 
         result = run_episode(env, red, blue)
