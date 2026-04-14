@@ -13,7 +13,7 @@ class EpisodeResult:
     turns: int
     red_bank: int
     blue_bank: int
-    ended_by: str  # "target_bank" or "max_turns"
+    ended_by: str  # "winner" or "max_turns"
 
 
 @dataclass
@@ -34,7 +34,7 @@ class MatchupSummary:
 def run_episode(env: AgeGridEnv, red_agent, blue_agent) -> EpisodeResult:
     """
     Runs one episode until:
-      - someone reaches env.config.target_bank, OR
+      - someone meets a win condition, OR
       - env.config.max_turns is reached
     """
     while env.turn < env.config.max_turns:
@@ -49,7 +49,7 @@ def run_episode(env: AgeGridEnv, red_agent, blue_agent) -> EpisodeResult:
                 turns=env.turn,
                 red_bank=env.bank["Red"],
                 blue_bank=env.bank["Blue"],
-                ended_by="target_bank",
+                ended_by="winner",
             )
 
         # --- Blue phase ---
@@ -63,7 +63,7 @@ def run_episode(env: AgeGridEnv, red_agent, blue_agent) -> EpisodeResult:
                 turns=env.turn,
                 red_bank=env.bank["Red"],
                 blue_bank=env.bank["Blue"],
-                ended_by="target_bank",
+                ended_by="winner",
             )
 
     # If we hit max turns, call it by bank or draw
@@ -102,7 +102,7 @@ def run_matchup(red_key: str, blue_key: str, episodes: int = 20) -> MatchupSumma
         total_red_bank += result.red_bank
         total_blue_bank += result.blue_bank
 
-        if result.ended_by == "target_bank":
+        if result.ended_by == "winner":
             ended_target += 1
         else:
             ended_max += 1
@@ -137,7 +137,8 @@ def main() -> None:
     ]
 
     config = AgeGridEnv().config
-    print(f"AgeGrid benchmark | target_bank={config.target_bank} | max_turns={config.max_turns}")
+    bank_target = config.target_bank if config.target_bank is not None else "disabled"
+    print(f"AgeGrid benchmark | target_bank={bank_target} | max_turns={config.max_turns}")
 
     for red_key, blue_key in matchups:
         summary = run_matchup(red_key, blue_key, episodes=20)

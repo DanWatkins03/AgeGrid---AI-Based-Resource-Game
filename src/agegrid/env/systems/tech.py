@@ -14,9 +14,18 @@ class TechDefinition:
 TECH_DEFS: dict[str, TechDefinition] = {
     "mining": TechDefinition(cost=35, turns=2, unlocks=("storehouse",)),
     "bronze_working": TechDefinition(cost=55, turns=3, requires=("mining",), unlocks=("barracks", "soldier")),
-    "masonry": TechDefinition(cost=45, turns=2, requires=("mining",), unlocks=("quarry", "turret")),
+    "masonry": TechDefinition(cost=45, turns=2, requires=("mining",), unlocks=("quarry", "archer_tower")),
     "horsemanship": TechDefinition(cost=45, turns=2, requires=("bronze_working",), unlocks=("stable", "horseman")),
     "fletching": TechDefinition(cost=55, turns=3, requires=("bronze_working",), unlocks=("archer",)),
+    "iron_working": TechDefinition(cost=65, turns=3, requires=("bronze_working",), unlocks=("soldier_upgrade",)),
+    "fortification": TechDefinition(cost=60, turns=3, requires=("masonry",), unlocks=("base_upgrade", "tower_upgrade")),
+    "stirrups": TechDefinition(cost=60, turns=3, requires=("horsemanship",), unlocks=("horseman_upgrade",)),
+    "engineering": TechDefinition(
+        cost=70,
+        turns=4,
+        requires=("masonry", "fletching"),
+        unlocks=("ballista_tower", "archer_upgrade"),
+    ),
 }
 
 

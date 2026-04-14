@@ -16,8 +16,7 @@ def gather(env, worker_id: int) -> bool:
     if node is None:
         return False
 
-    amount = min(env.config.worker_gather_amount, node.remaining)
-    node.remaining -= amount
+    amount = env.config.worker_gather_amount
     env.faction_state(unit.faction).resources += amount
     return True
 

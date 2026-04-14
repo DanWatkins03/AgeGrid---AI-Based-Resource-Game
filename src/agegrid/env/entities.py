@@ -32,7 +32,7 @@ class Unit:
 class Building:
     id: int
     faction: str
-    building_type: str  # "turret"
+    building_type: str  # "archer_tower", "ballista_tower", etc.
     hp: int
     position: Position
     attack_damage: int

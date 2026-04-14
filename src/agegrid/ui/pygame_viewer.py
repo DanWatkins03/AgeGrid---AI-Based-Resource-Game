@@ -48,10 +48,18 @@ RED_PRIMARY = (196, 88, 80)
 RED_ACCENT = (241, 202, 160)
 BLUE_PRIMARY = (88, 126, 212)
 BLUE_ACCENT = (176, 222, 255)
-HUD_BG = (15, 20, 27)
-GRID_BG = (29, 35, 43)
-GRID_ALT = (33, 40, 48)
-GRID_LINE = (58, 69, 80)
+HUD_BG = (12, 17, 24)
+PANEL_BG = (20, 27, 36)
+PANEL_INSET = (26, 33, 43)
+PANEL_BORDER = (70, 82, 98)
+PANEL_SOFT = (40, 48, 59)
+TEXT_PRIMARY = (236, 240, 245)
+TEXT_SECONDARY = (170, 179, 190)
+TEXT_MUTED = (127, 137, 149)
+GRID_BG = (24, 30, 38)
+GRID_ALT = (28, 35, 43)
+GRID_LINE = (52, 62, 74)
+GRID_HOVER = (108, 124, 146)
 RESOURCE_GLOW = (109, 192, 116)
 
 TECH_ICON_STYLES = {
@@ -60,6 +68,10 @@ TECH_ICON_STYLES = {
     "masonry": {"label": "S", "bg": (102, 108, 120), "fg": (236, 240, 246)},
     "horsemanship": {"label": "H", "bg": (126, 90, 58), "fg": (246, 230, 205)},
     "fletching": {"label": "F", "bg": (72, 108, 134), "fg": (224, 238, 250)},
+    "iron_working": {"label": "I", "bg": (95, 103, 112), "fg": (236, 239, 242)},
+    "fortification": {"label": "T", "bg": (92, 98, 84), "fg": (238, 241, 228)},
+    "stirrups": {"label": "R", "bg": (108, 82, 58), "fg": (245, 232, 214)},
+    "engineering": {"label": "E", "bg": (84, 104, 128), "fg": (227, 238, 248)},
 }
 
 TECH_LABELS = {
@@ -68,11 +80,66 @@ TECH_LABELS = {
     "masonry": "Masonry",
     "horsemanship": "Horse",
     "fletching": "Fletching",
+    "iron_working": "Iron",
+    "fortification": "Fortify",
+    "stirrups": "Stirrups",
+    "engineering": "Engineering",
+}
+
+TECH_TREE_ORDER = [
+    "mining",
+    "bronze_working",
+    "masonry",
+    "horsemanship",
+    "fletching",
+    "iron_working",
+    "fortification",
+    "stirrups",
+    "engineering",
+]
+
+BUILDING_LABELS = {
+    "storehouse": "Storehouse",
+    "barracks": "Barracks",
+    "quarry": "Quarry",
+    "stable": "Stable",
+    "archer_tower": "Archer Tower",
+    "ballista_tower": "Ballista Tower",
+}
+
+BUILDING_HELP = {
+    "storehouse": "Passive income each turn",
+    "barracks": "Trains soldiers and supports infantry tech",
+    "quarry": "Unlocks stone economy scaling",
+    "stable": "Trains horsemen",
+    "archer_tower": "Defensive ranged tower",
+    "ballista_tower": "Late defensive siege tower",
 }
 
 
 def _tech_label(tech_id: str) -> str:
     return TECH_LABELS.get(tech_id, tech_id.replace("_", " ").title())
+
+
+def _building_label(building_id: str) -> str:
+    return BUILDING_LABELS.get(building_id, building_id.replace("_", " ").title())
+
+
+def _tech_unlock_summary(tech_id: str) -> str:
+    unlocks = tech.TECH_DEFS[tech_id].unlocks
+    labels = [_tech_label(item) if item in TECH_LABELS else _building_label(item) for item in unlocks]
+    return ", ".join(labels) if labels else "-"
+
+
+def _tech_status(env: AgeGridEnv, faction: str, tech_id: str) -> str:
+    state = env.faction_state(faction)
+    if tech_id in state.techs_unlocked:
+        return "Done"
+    if state.tech_in_progress == tech_id:
+        return f"Active ({tech.research_turns_remaining(env, faction)}t)"
+    if tech.can_research(env, faction, tech_id):
+        return "Ready"
+    return "-"
 
 
 def _format_action(action: tuple | None) -> str:
@@ -166,6 +233,15 @@ def _wrap_lines(text: str, font: pygame.font.Font, width: int) -> list[str]:
     return lines
 
 
+def _fit_text(text: str, font: pygame.font.Font, width: int) -> str:
+    if font.size(text)[0] <= width:
+        return text
+    trimmed = text
+    while trimmed and font.size(f"{trimmed}...")[0] > width:
+        trimmed = trimmed[:-1]
+    return f"{trimmed}..." if trimmed else "..."
+
+
 def _draw_text_block(
     surface: pygame.Surface,
     font: pygame.font.Font,
@@ -216,6 +292,148 @@ def _draw_labeled_block(
     return y + 22 + len(wrapped) * 18
 
 
+def _draw_panel(
+    surface: pygame.Surface,
+    rect: pygame.Rect,
+    fill: tuple[int, int, int] = PANEL_BG,
+    border: tuple[int, int, int] = PANEL_BORDER,
+    radius: int = 14,
+) -> None:
+    pygame.draw.rect(surface, fill, rect, border_radius=radius)
+    pygame.draw.rect(surface, border, rect, width=2, border_radius=radius)
+
+
+def _draw_metric(
+    surface: pygame.Surface,
+    label_font: pygame.font.Font,
+    value_font: pygame.font.Font,
+    label: str,
+    value: str,
+    x: int,
+    y: int,
+    accent: tuple[int, int, int],
+) -> None:
+    _draw_shadow_text(surface, label_font, label, x, y, TEXT_MUTED, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_shadow_text(surface, value_font, value, x, y + 14, accent, shadow=(8, 10, 14), shadow_offset=1)
+
+
+def _draw_stat_box(
+    surface: pygame.Surface,
+    label_font: pygame.font.Font,
+    value_font: pygame.font.Font,
+    rect: pygame.Rect,
+    icon: str,
+    label: str,
+    value: str,
+    accent: tuple[int, int, int],
+) -> None:
+    pygame.draw.rect(surface, PANEL_INSET, rect, border_radius=10)
+    pygame.draw.rect(surface, PANEL_SOFT, rect, width=1, border_radius=10)
+    heading = _fit_text(f"{icon} {label}", label_font, rect.width - 20)
+    value_text = _fit_text(value, value_font, rect.width - 20)
+    _draw_shadow_text(surface, label_font, heading, rect.x + 10, rect.y + 6, TEXT_MUTED, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_shadow_text(surface, value_font, value_text, rect.x + 10, rect.y + 22, accent, shadow=(8, 10, 14), shadow_offset=1)
+
+
+def _draw_top_bar(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    env: AgeGridEnv,
+    rect: pygame.Rect,
+    button_rect: pygame.Rect,
+    winner: str | None,
+) -> None:
+    _draw_panel(surface, rect, fill=(16, 22, 30), border=PANEL_SOFT, radius=16)
+    left_x = rect.x + 20
+    center_x = rect.centerx
+    _draw_shadow_text(surface, body_font, "Turn", left_x, rect.y + 14, TEXT_SECONDARY, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_shadow_text(surface, title_font, str(env.turn), left_x, rect.y + 34, TEXT_PRIMARY, shadow=(6, 8, 12))
+    _draw_shadow_text(surface, body_font, env.formatted_year(), left_x + 68, rect.y + 19, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_shadow_text(surface, body_font, env.current_era(), left_x + 68, rect.y + 44, TEXT_MUTED, shadow=(8, 10, 14), shadow_offset=1)
+
+    current = winner or env.factions[env.current_player]
+    current_color = RED_PRIMARY if current == "Red" else BLUE_PRIMARY if current == "Blue" else TEXT_PRIMARY
+    status_label = "Round flow" if winner is None else "Winner"
+    status_value = f"{current} -> Blue" if winner is None and current == "Red" else f"Red -> {current}" if winner is None else current
+    _draw_shadow_text(surface, body_font, status_label, center_x - body_font.size(status_label)[0] // 2, rect.y + 14, TEXT_SECONDARY, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_shadow_text(surface, title_font, status_value, center_x - title_font.size(status_value)[0] // 2, rect.y + 34, current_color, shadow=(6, 8, 12))
+
+    btn_fill = (62, 86, 120) if winner is None else (64, 66, 72)
+    btn_border = (133, 179, 239) if winner is None else (100, 104, 112)
+    btn_text = TEXT_PRIMARY if winner is None else TEXT_SECONDARY
+    glow = pygame.Surface((button_rect.width + 18, button_rect.height + 18), pygame.SRCALPHA)
+    pygame.draw.rect(glow, (*btn_border, 55 if winner is None else 20), glow.get_rect(), border_radius=16)
+    surface.blit(glow, (button_rect.x - 9, button_rect.y - 9))
+    _draw_panel(surface, button_rect, fill=btn_fill, border=btn_border, radius=12)
+    label = "Next Turn" if winner is None else "Game Over"
+    _draw_shadow_text(
+        surface,
+        body_font,
+        label,
+        button_rect.centerx - body_font.size(label)[0] // 2,
+        button_rect.y + 11,
+        btn_text,
+        shadow=(12, 14, 18),
+        shadow_offset=1,
+    )
+
+
+def _draw_player_card(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    small_font: pygame.font.Font,
+    rect: pygame.Rect,
+    faction: str,
+    agent_label: str,
+    bank: int,
+    workers: int,
+    military: int,
+    base_hp: int,
+    mode_text: str,
+    composition: dict[str, int],
+    accent: tuple[int, int, int],
+) -> None:
+    _draw_panel(surface, rect, fill=PANEL_BG, border=accent, radius=16)
+    header = pygame.Rect(rect.x + 12, rect.y + 12, rect.width - 24, 38)
+    pygame.draw.rect(surface, PANEL_INSET, header, border_radius=10)
+    pygame.draw.rect(surface, PANEL_SOFT, header, width=1, border_radius=10)
+    _draw_shadow_text(surface, title_font, faction, header.x + 12, header.y + 7, accent, shadow=(8, 10, 14), shadow_offset=1)
+    fitted_agent = _fit_text(agent_label, small_font, header.width - 110)
+    _draw_shadow_text(surface, small_font, fitted_agent, header.right - small_font.size(fitted_agent)[0] - 12, header.y + 11, TEXT_SECONDARY, shadow=(8, 10, 14), shadow_offset=1)
+
+    fitted_mode = _fit_text(mode_text, small_font, 72)
+    mode_w = max(64, small_font.size(fitted_mode)[0] + 18)
+    mode_rect = pygame.Rect(rect.right - mode_w - 14, rect.bottom - 30, mode_w, 20)
+    pygame.draw.rect(surface, PANEL_INSET, mode_rect, border_radius=10)
+    pygame.draw.rect(surface, PANEL_SOFT, mode_rect, width=1, border_radius=10)
+    _draw_shadow_text(surface, small_font, fitted_mode, mode_rect.x + 9, mode_rect.y + 2, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
+
+    stats_left = rect.x + 14
+    stats_top = header.bottom + 10
+    stats_gap = 8
+    stats_width = rect.width - 28
+    box_w = (stats_width - stats_gap) // 2
+    box_h = 42
+    bank_rect = pygame.Rect(stats_left, stats_top, box_w, box_h)
+    worker_rect = pygame.Rect(stats_left + box_w + stats_gap, stats_top, box_w, box_h)
+    military_rect = pygame.Rect(stats_left, stats_top + box_h + stats_gap, box_w, box_h)
+    hp_rect = pygame.Rect(stats_left + box_w + stats_gap, stats_top + box_h + stats_gap, box_w, box_h)
+
+    _draw_stat_box(surface, small_font, small_font, bank_rect, "$", "Bank", str(bank), TEXT_PRIMARY)
+    _draw_stat_box(surface, small_font, small_font, worker_rect, "W", "Workers", str(workers), TEXT_PRIMARY)
+    _draw_stat_box(surface, small_font, small_font, military_rect, "M", "Military", str(military), TEXT_PRIMARY)
+    _draw_stat_box(surface, small_font, small_font, hp_rect, "HP", "Base", str(base_hp), accent)
+
+    comp_text = f"S{composition['soldier']}  A{composition['archer']}  H{composition['horseman']}"
+    comp_text = _fit_text(comp_text, small_font, rect.width - mode_w - 46)
+    comp_w = small_font.size(comp_text)[0] + 18
+    comp_rect = pygame.Rect(rect.x + 14, rect.bottom - 30, comp_w, 20)
+    pygame.draw.rect(surface, PANEL_INSET, comp_rect, border_radius=9)
+    pygame.draw.rect(surface, PANEL_SOFT, comp_rect, width=1, border_radius=9)
+    _draw_shadow_text(surface, small_font, comp_text, comp_rect.x + 9, comp_rect.y + 2, TEXT_SECONDARY, shadow=(8, 10, 14), shadow_offset=1)
+
 def _event_color(line: str) -> tuple[int, int, int]:
     if line.startswith("Red "):
         return (244, 184, 180)
@@ -230,27 +448,42 @@ def _draw_event_panel(
     body_font: pygame.font.Font,
     lines: list[str],
     rect: pygame.Rect,
+    scroll_offset: int = 0,
 ) -> None:
-    pygame.draw.rect(surface, (24, 31, 40), rect, border_radius=10)
-    pygame.draw.rect(surface, (70, 84, 99), rect, width=2, border_radius=10)
+    _draw_panel(surface, rect, fill=PANEL_BG, border=PANEL_BORDER, radius=12)
     _draw_shadow_text(
         surface,
         title_font,
-        "Recent events",
+        "Events",
         rect.x + 12,
         rect.y + 10,
-        (231, 236, 241),
+        TEXT_PRIMARY,
         shadow=(10, 12, 16),
     )
 
-    y = rect.y + 34
+    y = rect.y + 38
     max_width = rect.width - 24
-    event_lines = lines if lines else ["-"]
+    line_height = 18
+    event_lines = lines if lines else ["No events yet"]
+    wrapped_entries: list[tuple[list[str], tuple[int, int, int]]] = []
     for entry in event_lines:
         wrapped = _wrap_lines(entry, body_font, max_width)
         color = _event_color(entry)
-        _draw_text_block(surface, body_font, wrapped, rect.x + 12, y, color, 18)
-        y += len(wrapped) * 18 + 8
+        wrapped_entries.append((wrapped, color))
+    visible_height = rect.height - 50
+    cursor = 0
+    start = max(0, scroll_offset)
+    for wrapped, color in wrapped_entries[start:]:
+        block_h = len(wrapped) * line_height + 8
+        if cursor + block_h > visible_height:
+            break
+        _draw_text_block(surface, body_font, wrapped, rect.x + 12, y + cursor, color, line_height)
+        cursor += block_h
+
+    total_rows = len(wrapped_entries)
+    if total_rows > 5:
+        note = f"{min(total_rows, start + 5)}/{total_rows}"
+        _draw_shadow_text(surface, body_font, note, rect.right - body_font.size(note)[0] - 12, rect.y + 12, TEXT_MUTED, shadow=(10, 12, 16), shadow_offset=1)
 
 
 def _draw_research_panel(
@@ -260,15 +493,14 @@ def _draw_research_panel(
     env: AgeGridEnv,
     rect: pygame.Rect,
 ) -> None:
-    pygame.draw.rect(surface, (24, 31, 40), rect, border_radius=10)
-    pygame.draw.rect(surface, (70, 84, 99), rect, width=2, border_radius=10)
+    _draw_panel(surface, rect, fill=PANEL_BG, border=PANEL_BORDER, radius=12)
     _draw_shadow_text(
         surface,
         title_font,
-        "Research status",
+        "Research",
         rect.x + 12,
         rect.y + 10,
-        (231, 236, 241),
+        TEXT_PRIMARY,
         shadow=(10, 12, 16),
     )
 
@@ -286,18 +518,18 @@ def _draw_research_panel(
             turns_left = tech.research_turns_remaining(env, faction)
             total_turns = tech.TECH_DEFS[state.tech_in_progress].turns
             progress_ratio = min(1.0, state.research_points / total_turns) if total_turns > 0 else 1.0
-            status = f"Researching {_tech_label(state.tech_in_progress)}"
-            eta = f"ETA: {turns_left} turn{'s' if turns_left != 1 else ''} left"
+            status = _tech_label(state.tech_in_progress)
+            eta = f"{turns_left} turn{'s' if turns_left != 1 else ''} left"
         else:
             progress_ratio = 0.0
-            status = "No active research"
-            eta = "ETA: choose a tech to begin"
+            status = "None"
+            eta = None
         icon_key = state.tech_in_progress or (available[0] if available else None)
         icon_style = TECH_ICON_STYLES.get(icon_key or "", {"label": "?", "bg": (70, 76, 84), "fg": (232, 236, 240)})
         subsection_h = _research_subsection_height(body_font, faction, status, eta, available_labels, max_width)
         subsection_rect = pygame.Rect(rect.x + 10, y, rect.width - 20, subsection_h)
-        pygame.draw.rect(surface, (30, 37, 46), subsection_rect, border_radius=8)
-        pygame.draw.rect(surface, (82, 94, 108), subsection_rect, width=1, border_radius=8)
+        pygame.draw.rect(surface, PANEL_INSET, subsection_rect, border_radius=8)
+        pygame.draw.rect(surface, PANEL_SOFT, subsection_rect, width=1, border_radius=8)
 
         inner_x = subsection_rect.x + 10
         inner_y = subsection_rect.y + 10
@@ -319,16 +551,15 @@ def _draw_research_panel(
         _draw_text_block(surface, body_font, header_lines, inner_x + 30, inner_y, color, 18)
         content_y = inner_y + max(26, len(header_lines) * 18) + 6
 
-        detail_lines = [
-            eta,
-            f"Available: {', '.join(available_labels) if available_labels else '-'}",
-        ]
+        detail_lines = [f"Next: {', '.join(available_labels[:3]) if available_labels else '-'}"]
+        if eta:
+            detail_lines.insert(0, eta)
         for line in detail_lines:
             wrapped = _wrap_lines(line, body_font, inner_width)
-            _draw_text_block(surface, body_font, wrapped, inner_x, content_y, color, 18)
+            _draw_text_block(surface, body_font, wrapped, inner_x, content_y, TEXT_SECONDARY, 18)
             content_y += len(wrapped) * 18
             content_y += 4
-        bar_rect = pygame.Rect(inner_x, content_y + 4, inner_width, 10)
+        bar_rect = pygame.Rect(inner_x, content_y + 6, inner_width, 10)
         pygame.draw.rect(surface, (44, 52, 62), bar_rect, border_radius=5)
         if progress_ratio > 0:
             fill_width = max(8, int(bar_rect.width * progress_ratio))
@@ -371,15 +602,10 @@ def _research_panel_height(
         if state.tech_in_progress:
             turns_left = tech.research_turns_remaining(env, faction)
             status = f"Researching {_tech_label(state.tech_in_progress)}"
-            eta = f"ETA: {turns_left} turn{'s' if turns_left != 1 else ''} left"
+            eta = f"{turns_left} turn{'s' if turns_left != 1 else ''} left"
         else:
-            status = "No active research"
-            eta = "ETA: choose a tech to begin"
-        summary_lines = [
-            f"{faction}: {status}",
-            eta,
-            f"Available: {', '.join(available_labels) if available_labels else '-'}",
-        ]
+            status = "None"
+            eta = None
         total += _research_subsection_height(body_font, faction, status, eta, available_labels, width - 24)
         total += 12
     return total + 12
@@ -389,17 +615,17 @@ def _research_subsection_height(
     body_font: pygame.font.Font,
     faction: str,
     status: str,
-    eta: str,
+    eta: str | None,
     available_labels: list[str],
     width: int,
 ) -> int:
     header_lines = _wrap_lines(f"{faction}: {status}", body_font, width - 40)
-    detail_one = _wrap_lines(eta, body_font, width)
+    detail_one = _wrap_lines(eta, body_font, width) if eta else []
     detail_two = _wrap_lines(f"Available: {', '.join(available_labels) if available_labels else '-'}", body_font, width)
     total = 10
     total += max(26, len(header_lines) * 18)
     total += 6
-    total += len(detail_one) * 18 + 4
+    total += len(detail_one) * 18 + 4 if eta else 0
     total += len(detail_two) * 18 + 4
     total += 24
     total += 10
@@ -408,19 +634,11 @@ def _research_subsection_height(
 
 def _tactical_panel_lines(env: AgeGridEnv, faction: str) -> list[str]:
     composition = unit_composition(env, faction)
-    friendly_strength, enemy_strength = army_strength_near_base(env, faction)
-    army_delta = friendly_strength - enemy_strength
-    delta_label = f"+{army_delta}" if army_delta > 0 else str(army_delta)
     mode = "Defense" if defense_mode_active(env, faction) else "Push" if push_mode_active(env, faction) else "Field"
     return [
-        f"{faction} threat: {threat_level(env, faction)}",
-        f"{faction} mode: {mode}",
-        f"{faction} army plan: {army_plan(env, faction)}",
-        (
-            f"{faction} comp: W{composition['worker']} "
-            f"S{composition['soldier']} A{composition['archer']} H{composition['horseman']}"
-        ),
-        f"{faction} base force: {friendly_strength} vs {enemy_strength} ({delta_label})",
+        f"Threat {threat_level(env, faction)}",
+        f"Plan {army_plan(env, faction)} | {mode}",
+        f"Army W{composition['worker']} S{composition['soldier']} A{composition['archer']} H{composition['horseman']}",
     ]
 
 
@@ -428,9 +646,10 @@ def _tactical_panel_height(body_font: pygame.font.Font, env: AgeGridEnv, width: 
     total = 36
     content_width = width - 24
     for faction in ("Red", "Blue"):
+        total += 20
         for line in _tactical_panel_lines(env, faction):
-            total += len(_wrap_lines(line, body_font, content_width)) * 18
-        total += 10
+            total += len(_wrap_lines(line, body_font, content_width)) * 16
+        total += 12
     return total + 8
 
 
@@ -441,25 +660,318 @@ def _draw_tactical_panel(
     env: AgeGridEnv,
     rect: pygame.Rect,
 ) -> None:
-    pygame.draw.rect(surface, (24, 31, 40), rect, border_radius=10)
-    pygame.draw.rect(surface, (70, 84, 99), rect, width=2, border_radius=10)
+    _draw_panel(surface, rect, fill=PANEL_BG, border=PANEL_BORDER, radius=12)
     _draw_shadow_text(
         surface,
         title_font,
-        "Tactical status",
+        "Tactical",
         rect.x + 12,
         rect.y + 10,
-        (231, 236, 241),
+        TEXT_PRIMARY,
         shadow=(10, 12, 16),
     )
 
-    y = rect.y + 36
+    y = rect.y + 38
     for faction, color in (("Red", (244, 184, 180)), ("Blue", (176, 214, 255))):
+        _draw_shadow_text(surface, body_font, faction, rect.x + 12, y, color, shadow=(10, 12, 16), shadow_offset=1)
+        y += 20
         for line in _tactical_panel_lines(env, faction):
             wrapped = _wrap_lines(line, body_font, rect.width - 24)
-            _draw_text_block(surface, body_font, wrapped, rect.x + 12, y, color, 18)
-            y += len(wrapped) * 18
-        y += 10
+            _draw_text_block(surface, body_font, wrapped, rect.x + 12, y, TEXT_SECONDARY, 16)
+            y += len(wrapped) * 16
+        y += 12
+
+
+def _draw_small_button(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    rect: pygame.Rect,
+    label: str,
+    active: bool = False,
+) -> None:
+    fill = (58, 79, 108) if active else PANEL_INSET
+    border = (132, 176, 232) if active else PANEL_SOFT
+    _draw_panel(surface, rect, fill=fill, border=border, radius=10)
+    _draw_shadow_text(
+        surface,
+        font,
+        label,
+        rect.centerx - font.size(label)[0] // 2,
+        rect.y + 6,
+        TEXT_PRIMARY,
+        shadow=(10, 12, 16),
+        shadow_offset=1,
+    )
+
+
+def _draw_resource_icon(screen: pygame.Surface, resource, center: tuple[int, int], small_font: pygame.font.Font) -> None:
+    cx, cy = center
+    if resource.resource_type == "horses":
+        pygame.draw.circle(screen, (91, 73, 49), (cx, cy), 14)
+        pygame.draw.circle(screen, (212, 182, 117), (cx, cy), 10)
+        pygame.draw.circle(screen, (91, 73, 49), (cx - 3, cy - 2), 3)
+        pygame.draw.polygon(screen, (91, 73, 49), [(cx + 2, cy - 8), (cx + 8, cy - 14), (cx + 6, cy - 5)])
+        pygame.draw.arc(screen, (244, 233, 205), (cx - 7, cy - 5, 14, 14), 0.2, 2.9, 2)
+    elif resource.resource_type == "stone":
+        rock = [(cx - 12, cy + 2), (cx - 6, cy - 10), (cx + 5, cy - 12), (cx + 13, cy - 2), (cx + 7, cy + 11), (cx - 7, cy + 10)]
+        pygame.draw.polygon(screen, (124, 132, 144), rock)
+        pygame.draw.polygon(screen, (205, 212, 222), rock, width=2)
+        pygame.draw.line(screen, (88, 94, 104), (cx - 4, cy - 6), (cx + 3, cy + 6), 2)
+        pygame.draw.line(screen, (88, 94, 104), (cx + 5, cy - 5), (cx + 8, cy + 4), 2)
+    else:
+        gem = [(cx, cy - 14), (cx + 12, cy - 3), (cx + 8, cy + 10), (cx, cy + 14), (cx - 8, cy + 10), (cx - 12, cy - 3)]
+        pygame.draw.polygon(screen, (92, 170, 98), gem)
+        pygame.draw.polygon(screen, (219, 247, 200), gem, width=2)
+        pygame.draw.line(screen, (219, 247, 200), (cx, cy - 12), (cx, cy + 11), 2)
+        pygame.draw.line(screen, (219, 247, 200), (cx - 7, cy - 1), (cx + 7, cy - 1), 2)
+
+
+def _draw_building_icon(screen: pygame.Surface, building, rect: pygame.Rect, border: tuple[int, int, int]) -> None:
+    body = rect.inflate(-2, -2)
+    roof = [(body.x + 4, body.y + 7), (body.centerx, body.y - 5), (body.right - 4, body.y + 7)]
+    pygame.draw.polygon(screen, (88, 59, 41), roof)
+    if building.building_type == "storehouse":
+        pygame.draw.rect(screen, (225, 176, 128), body, border_radius=6)
+        pygame.draw.rect(screen, (244, 236, 220), body, width=2, border_radius=6)
+        door = pygame.Rect(body.centerx - 5, body.bottom - 12, 10, 10)
+        pygame.draw.rect(screen, (123, 79, 47), door, border_radius=2)
+        pygame.draw.line(screen, (244, 236, 220), (body.x + 7, body.y + 14), (body.right - 7, body.y + 14), 2)
+    elif building.building_type == "stable":
+        pygame.draw.rect(screen, (198, 146, 103), body, border_radius=6)
+        pygame.draw.rect(screen, (244, 236, 220), body, width=2, border_radius=6)
+        pygame.draw.arc(screen, (244, 236, 220), (body.centerx - 7, body.y + 10, 14, 12), 0.1, 3.0, 2)
+        pygame.draw.circle(screen, (244, 236, 220), (body.centerx + 7, body.y + 16), 2)
+    elif building.building_type == "barracks":
+        pygame.draw.rect(screen, (191, 130, 108), body, border_radius=4)
+        pygame.draw.rect(screen, (244, 236, 220), body, width=2, border_radius=4)
+        pygame.draw.rect(screen, (244, 236, 220), (body.x + 5, body.y + 7, 5, 8))
+        pygame.draw.rect(screen, (244, 236, 220), (body.right - 10, body.y + 7, 5, 8))
+        pygame.draw.line(screen, border, (body.centerx + 7, body.y + 2), (body.centerx + 7, body.y - 9), 2)
+        pygame.draw.polygon(screen, border, [(body.centerx + 7, body.y - 9), (body.centerx + 14, body.y - 6), (body.centerx + 7, body.y - 3)])
+    elif building.building_type == "quarry":
+        pygame.draw.rect(screen, (150, 156, 168), body, border_radius=5)
+        pygame.draw.rect(screen, (240, 242, 246), body, width=2, border_radius=5)
+        pygame.draw.line(screen, (96, 102, 114), (body.x + 7, body.bottom - 6), (body.right - 7, body.y + 8), 3)
+        pygame.draw.line(screen, (240, 242, 246), (body.x + 8, body.bottom - 7), (body.x + 14, body.bottom - 13), 2)
+    elif building.building_type == "archer_tower":
+        tower = pygame.Rect(body.x + 7, body.y + 2, body.width - 14, body.height - 4)
+        pygame.draw.rect(screen, (184, 157, 120), tower, border_radius=4)
+        pygame.draw.rect(screen, (244, 236, 220), tower, width=2, border_radius=4)
+        pygame.draw.line(screen, (244, 236, 220), (tower.x + 5, tower.y + 8), (tower.right - 5, tower.y + 8), 2)
+        pygame.draw.arc(screen, border, (tower.centerx - 8, tower.y + 10, 16, 14), 0.5, 2.6, 2)
+    elif building.building_type == "ballista_tower":
+        tower = pygame.Rect(body.x + 7, body.y + 2, body.width - 14, body.height - 4)
+        pygame.draw.rect(screen, (170, 146, 122), tower, border_radius=4)
+        pygame.draw.rect(screen, (244, 236, 220), tower, width=2, border_radius=4)
+        pygame.draw.line(screen, border, (tower.centerx - 8, tower.y + 11), (tower.centerx + 8, tower.y + 11), 2)
+        pygame.draw.line(screen, border, (tower.centerx, tower.y + 7), (tower.centerx, tower.y + 17), 2)
+        pygame.draw.line(screen, border, (tower.centerx + 8, tower.y + 11), (tower.centerx + 14, tower.y + 6), 2)
+
+
+def _draw_unit_icon(screen: pygame.Surface, unit, center: tuple[int, int], fill: tuple[int, int, int], border: tuple[int, int, int]) -> None:
+    cx, cy = center
+    if unit.unit_type == "worker":
+        pygame.draw.circle(screen, fill, (cx, cy - 6), 7)
+        pygame.draw.circle(screen, border, (cx, cy - 6), 7, width=2)
+        pygame.draw.line(screen, border, (cx, cy + 2), (cx, cy + 14), 3)
+        pygame.draw.line(screen, border, (cx - 7, cy + 7), (cx + 7, cy + 3), 3)
+        pygame.draw.line(screen, border, (cx + 4, cy - 1), (cx + 13, cy - 11), 3)
+        pygame.draw.line(screen, (240, 240, 240), (cx + 11, cy - 13), (cx + 17, cy - 7), 2)
+    elif unit.unit_type == "soldier":
+        shield = [(cx, cy - 14), (cx + 11, cy - 6), (cx + 8, cy + 10), (cx, cy + 15), (cx - 8, cy + 10), (cx - 11, cy - 6)]
+        pygame.draw.polygon(screen, fill, shield)
+        pygame.draw.polygon(screen, border, shield, width=2)
+        pygame.draw.line(screen, (244, 244, 244), (cx, cy - 10), (cx, cy + 10), 2)
+        pygame.draw.line(screen, border, (cx + 9, cy - 12), (cx + 17, cy - 20), 3)
+    elif unit.unit_type == "horseman":
+        horse = [(cx - 13, cy + 5), (cx - 8, cy - 6), (cx + 4, cy - 10), (cx + 13, cy - 3), (cx + 10, cy + 8), (cx - 2, cy + 12)]
+        pygame.draw.polygon(screen, fill, horse)
+        pygame.draw.polygon(screen, border, horse, width=2)
+        pygame.draw.line(screen, border, (cx - 6, cy + 10), (cx - 8, cy + 16), 2)
+        pygame.draw.line(screen, border, (cx + 2, cy + 10), (cx + 1, cy + 17), 2)
+        pygame.draw.line(screen, border, (cx + 5, cy - 6), (cx + 15, cy - 18), 3)
+    elif unit.unit_type == "archer":
+        pygame.draw.circle(screen, fill, (cx, cy - 6), 7)
+        pygame.draw.circle(screen, border, (cx, cy - 6), 7, width=2)
+        pygame.draw.line(screen, border, (cx, cy + 2), (cx, cy + 14), 3)
+        pygame.draw.arc(screen, border, (cx + 2, cy - 8, 16, 22), 4.8, 1.4, 2)
+        pygame.draw.line(screen, border, (cx + 10, cy - 6), (cx + 10, cy + 11), 2)
+        pygame.draw.line(screen, (244, 244, 244), (cx - 4, cy + 1), (cx + 12, cy - 4), 2)
+    else:
+        pygame.draw.circle(screen, fill, (cx, cy), 13)
+        pygame.draw.circle(screen, border, (cx, cy), 13, width=2)
+
+
+def _hover_tile_lines(env: AgeGridEnv, pos: tuple[int, int]) -> list[str]:
+    unit = next((u for u in env.units if u.position == pos), None)
+    if unit is not None:
+        label = unit.unit_type.replace("_", " ").title()
+        return [
+            f"{unit.faction} {label}",
+            f"HP {unit.hp}  ATK {unit.attack_damage}  RNG {unit.attack_range}",
+        ]
+    building = next((b for b in env.buildings if b.position == pos and b.hp > 0), None)
+    if building is not None:
+        label = _building_label(building.building_type)
+        return [
+            f"{building.faction} {label}",
+            f"HP {building.hp}",
+            BUILDING_HELP.get(building.building_type, "Structure"),
+        ]
+    base = next((base for faction, base in env.bases.items() if base.position == pos), None)
+    if base is not None:
+        faction = next(name for name, current_base in env.bases.items() if current_base is base)
+        return [f"{faction} Base", f"HP {base.hp}"]
+    resource = next((r for r in env.resources if r.position == pos and r.remaining > 0), None)
+    if resource is not None:
+        label = "Horse Herd" if resource.resource_type == "horses" else "Stone Deposit" if resource.resource_type == "stone" else "Ore Vein"
+        detail = "Unlocks stable and horsemen" if resource.resource_type == "horses" else "Unlocks quarry and fortification" if resource.resource_type == "stone" else "Gatherable resource"
+        return [label, detail]
+    return []
+
+
+def _draw_hover_tile_panel(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    rect: pygame.Rect,
+    lines: list[str],
+) -> None:
+    if not lines:
+        return
+    _draw_panel(surface, rect, fill=(13, 18, 24), border=PANEL_SOFT, radius=10)
+    _draw_shadow_text(surface, title_font, lines[0], rect.x + 10, rect.y + 8, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
+    _draw_text_block(surface, body_font, lines[1:], rect.x + 10, rect.y + 30, TEXT_SECONDARY, 16)
+
+
+def _hover_panel_rect(
+    surface: pygame.Surface,
+    body_font: pygame.font.Font,
+    tile_rect: pygame.Rect,
+    lines: list[str],
+) -> pygame.Rect:
+    line_height = 16
+    width = 210
+    height = 40 + max(1, len(lines) - 1) * line_height
+    x = tile_rect.right + 10
+    y = tile_rect.y - 4
+    if x + width > surface.get_width() - 8:
+        x = tile_rect.x - width - 10
+    if x < 8:
+        x = 8
+    if y + height > surface.get_height() - 8:
+        y = surface.get_height() - height - 8
+    if y < 8:
+        y = 8
+    return pygame.Rect(x, y, width, height)
+
+
+def _tech_tree_positions(rect: pygame.Rect) -> dict[str, tuple[int, int]]:
+    left = rect.x + 94
+    top = rect.y + 108
+    x_gap = 170
+    y_gap = 122
+    return {
+        "mining": (left, top + y_gap),
+        "bronze_working": (left + x_gap, top + y_gap),
+        "masonry": (left + x_gap, top + y_gap * 2),
+        "horsemanship": (left + x_gap * 2, top + y_gap),
+        "fletching": (left + x_gap * 2, top),
+        "iron_working": (left + x_gap * 2, top + y_gap * 2),
+        "fortification": (left + x_gap * 3, top + y_gap * 2),
+        "stirrups": (left + x_gap * 3, top + y_gap),
+        "engineering": (left + x_gap * 3, top),
+    }
+
+
+def _draw_tech_tree_overlay(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    env: AgeGridEnv,
+    rect: pygame.Rect,
+) -> None:
+    veil = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+    veil.fill((8, 12, 18, 170))
+    surface.blit(veil, (0, 0))
+    pygame.draw.rect(surface, (20, 27, 35), rect, border_radius=14)
+    pygame.draw.rect(surface, (86, 102, 119), rect, width=2, border_radius=14)
+    _draw_shadow_text(
+        surface,
+        title_font,
+        "Research tree",
+        rect.x + 16,
+        rect.y + 14,
+        (235, 239, 244),
+        shadow=(10, 12, 16),
+    )
+    note = "Press T to close"
+    note_width = body_font.size(note)[0]
+    _draw_shadow_text(
+        surface,
+        body_font,
+        note,
+        rect.right - note_width - 18,
+        rect.y + 18,
+        (186, 194, 202),
+        shadow=(10, 12, 16),
+        shadow_offset=1,
+    )
+    subtitle = "Unlock paths, status, and what each tech enables"
+    _draw_shadow_text(surface, body_font, subtitle, rect.x + 16, rect.y + 46, TEXT_SECONDARY, shadow=(10, 12, 16), shadow_offset=1)
+
+    positions = _tech_tree_positions(rect)
+    for tech_id, definition in tech.TECH_DEFS.items():
+        start = positions[tech_id]
+        for req in definition.requires:
+            end = positions[req]
+            points = [(end[0] + 56, end[1]), ((start[0] + end[0]) // 2, end[1]), ((start[0] + end[0]) // 2, start[1]), (start[0] - 56, start[1])]
+            pygame.draw.lines(surface, (88, 102, 118), False, points, 3)
+
+    legend = [("Done", (78, 122, 86)), ("Active", (95, 121, 166)), ("Ready", (129, 112, 70)), ("Locked", (70, 76, 84))]
+    lx = rect.x + 16
+    for label, color in legend:
+        chip = pygame.Rect(lx, rect.bottom - 34, 70, 20)
+        pygame.draw.rect(surface, color, chip, border_radius=10)
+        _draw_shadow_text(surface, body_font, label, chip.x + 12, chip.y + 2, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+        lx += 82
+
+    for tech_id in TECH_TREE_ORDER:
+        cx, cy = positions[tech_id]
+        node_rect = pygame.Rect(cx - 56, cy - 34, 112, 68)
+        red_status = _tech_status(env, "Red", tech_id)
+        blue_status = _tech_status(env, "Blue", tech_id)
+        unlocked_any = red_status == "Done" or blue_status == "Done"
+        ready_any = red_status == "Ready" or blue_status == "Ready"
+        active_any = red_status.startswith("Active") or blue_status.startswith("Active")
+        node_fill = (74, 80, 88)
+        if unlocked_any:
+            node_fill = (54, 75, 58)
+        elif active_any:
+            node_fill = (58, 76, 104)
+        elif ready_any:
+            node_fill = (92, 79, 54)
+        pygame.draw.rect(surface, node_fill, node_rect, border_radius=14)
+        pygame.draw.rect(surface, (184, 194, 206), node_rect, width=2, border_radius=14)
+
+        style = TECH_ICON_STYLES.get(tech_id, {"label": "?", "bg": (74, 80, 88), "fg": (235, 239, 242)})
+        icon_rect = pygame.Rect(node_rect.x + 8, node_rect.y + 8, 24, 24)
+        pygame.draw.rect(surface, style["bg"], icon_rect, border_radius=6)
+        pygame.draw.rect(surface, (236, 240, 244), icon_rect, width=1, border_radius=6)
+        _draw_shadow_text(surface, body_font, style["label"], icon_rect.x + 6, icon_rect.y + 2, style["fg"], shadow=(12, 16, 20), shadow_offset=1)
+        _draw_shadow_text(surface, body_font, _tech_label(tech_id), node_rect.x + 38, node_rect.y + 8, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+        unlocks = _tech_unlock_summary(tech_id)
+        unlock_lines = _wrap_lines(unlocks, body_font, 96)
+        _draw_text_block(surface, body_font, unlock_lines[:2], node_rect.x + 8, node_rect.y + 36, TEXT_SECONDARY, 15)
+
+        red_chip = pygame.Rect(node_rect.x + 8, node_rect.bottom + 6, 44, 18)
+        blue_chip = pygame.Rect(node_rect.right - 52, node_rect.bottom + 6, 44, 18)
+        pygame.draw.rect(surface, (82, 52, 52), red_chip, border_radius=9)
+        pygame.draw.rect(surface, (52, 66, 92), blue_chip, border_radius=9)
+        red_text = "Done" if red_status == "Done" else "Act" if red_status.startswith("Active") else "Go" if red_status == "Ready" else "-"
+        blue_text = "Done" if blue_status == "Done" else "Act" if blue_status.startswith("Active") else "Go" if blue_status == "Ready" else "-"
+        _draw_shadow_text(surface, body_font, f"R {red_text}", red_chip.x + 7, red_chip.y + 1, (244, 184, 180), shadow=(10, 12, 16), shadow_offset=1)
+        _draw_shadow_text(surface, body_font, f"B {blue_text}", blue_chip.x + 7, blue_chip.y + 1, (176, 214, 255), shadow=(10, 12, 16), shadow_offset=1)
 
 
 def _tile_center(ox: int, oy: int, tile: int, pos: tuple[int, int]) -> tuple[int, int]:
@@ -583,7 +1095,8 @@ def _draw_setup_screen(
     small_font: pygame.font.Font,
     red_index: int,
     blue_index: int,
-) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
+    collapse_enabled: bool,
+) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
     screen.fill((19, 24, 30))
 
     title = title_font.render("AgeGrid Viewer Setup", True, (238, 240, 242))
@@ -606,7 +1119,8 @@ def _draw_setup_screen(
         "R resets to setup. P saves a debug snapshot. Esc closes the viewer.",
     ]
     tips_height = len(tips) * 18
-    start_btn_y = blue_card.bottom + 28
+    rules_btn = pygame.Rect(width_px // 2 - 110, blue_card.bottom + 22, 220, 36)
+    start_btn_y = rules_btn.bottom + 18
     start_btn = pygame.Rect(width_px // 2 - 90, start_btn_y, 180, 46)
 
     for rect, faction, idx, color in (
@@ -625,13 +1139,28 @@ def _draw_setup_screen(
         hint_y = rect.y + rect.h - 18 - len(hint_lines) * 18
         _draw_text_block(screen, small_font, hint_lines, rect.x + 18, hint_y, (160, 168, 176), 18)
 
+    rule_fill = (58, 79, 108) if collapse_enabled else PANEL_INSET
+    rule_border = (132, 176, 232) if collapse_enabled else PANEL_SOFT
+    _draw_panel(screen, rules_btn, fill=rule_fill, border=rule_border, radius=10)
+    rule_label = "Collapse: On" if collapse_enabled else "Collapse: Off"
+    _draw_shadow_text(
+        screen,
+        small_font,
+        rule_label,
+        rules_btn.centerx - small_font.size(rule_label)[0] // 2,
+        rules_btn.y + 8,
+        TEXT_PRIMARY,
+        shadow=(10, 12, 16),
+        shadow_offset=1,
+    )
+
     pygame.draw.rect(screen, (74, 102, 72), start_btn, border_radius=10)
     pygame.draw.rect(screen, (136, 181, 131), start_btn, width=2, border_radius=10)
     screen.blit(font.render("Start Match", True, (244, 246, 244)), (start_btn.x + 42, start_btn.y + 11))
 
     tips_y = min(height_px - 24 - tips_height, start_btn.bottom + 22)
     _draw_text_block(screen, small_font, tips, 40, tips_y, (180, 186, 192), 18)
-    return red_card, blue_card, start_btn
+    return red_card, blue_card, rules_btn, start_btn
 
 
 def _turn_history_text(history: list[TurnSnapshot]) -> list[str]:
@@ -660,8 +1189,10 @@ def _build_debug_snapshot(
     lines = [
         "=== AgeGrid Debug Snapshot ===",
         f"Turn: {env.turn}",
+        f"Year/Era: {env.formatted_year()} / {env.current_era()}",
         f"Current player: {env.factions[env.current_player]}",
         f"Winner: {env.winner() or '-'}",
+        f"Collapse rule: {'On' if env.config.collapse_enabled else 'Off'}",
         f"Red agent: {red_agent_label}",
         f"Blue agent: {blue_agent_label}",
         f"Red bank/base HP: {env.bank['Red']} / {env.bases['Red'].hp}",
@@ -678,8 +1209,8 @@ def _build_debug_snapshot(
         f"Blue army plan: {army_plan(env, 'Blue')}",
         f"Red techs: {', '.join(sorted(env.faction_state('Red').techs_unlocked)) or '-'}",
         f"Blue techs: {', '.join(sorted(env.faction_state('Blue').techs_unlocked)) or '-'}",
-        f"Red buildings: {', '.join(sorted(f'{b.building_type}@{b.position}' for b in env.buildings if b.faction == 'Red' and b.hp > 0)) or '-'}",
-        f"Blue buildings: {', '.join(sorted(f'{b.building_type}@{b.position}' for b in env.buildings if b.faction == 'Blue' and b.hp > 0)) or '-'}",
+        f"Red buildings: {', '.join(sorted(f'{_building_label(b.building_type)}@{b.position}' for b in env.buildings if b.faction == 'Red' and b.hp > 0)) or '-'}",
+        f"Blue buildings: {', '.join(sorted(f'{_building_label(b.building_type)}@{b.position}' for b in env.buildings if b.faction == 'Blue' and b.hp > 0)) or '-'}",
         (
             "Red comp/base force: "
             f"{unit_composition(env, 'Red')} / {army_strength_near_base(env, 'Red')[0]} vs {army_strength_near_base(env, 'Red')[1]}"
@@ -721,8 +1252,8 @@ def run_viewer() -> None:
 
     tile = 48
     pad = 16
-    top_bar = 252
-    side_panel = 300
+    top_bar = 348
+    side_panel = 292
     board_width = env.config.width * tile
 
     width_px = pad * 3 + board_width + side_panel
@@ -731,16 +1262,17 @@ def run_viewer() -> None:
     screen = pygame.display.set_mode((width_px, height_px))
     clock = pygame.time.Clock()
 
-    font = pygame.font.SysFont(None, 24)
-    big = pygame.font.SysFont(None, 30)
-    small = pygame.font.SysFont(None, 19)
-    tiny = pygame.font.SysFont(None, 17)
+    font = pygame.font.SysFont("segoeui", 24, bold=True)
+    big = pygame.font.SysFont("segoeui", 34, bold=True)
+    small = pygame.font.SysFont("segoeui", 18)
+    tiny = pygame.font.SysFont("segoeui", 16)
 
-    btn_w, btn_h = 140, 36
-    btn_rect = pygame.Rect(width_px - pad - btn_w, pad, btn_w, btn_h)
+    btn_w, btn_h = 156, 42
+    btn_rect = pygame.Rect(pad + board_width - btn_w - 18, pad + 26, btn_w, btn_h)
 
     red_index = 0
-    blue_index = 1 if len(AGENT_SPECS) > 1 else 0
+    blue_index = 0
+    collapse_enabled = True
     in_setup = True
     red_agent = None
     blue_agent = None
@@ -748,13 +1280,18 @@ def run_viewer() -> None:
     blue_info = FactionTurnInfo("Blue", [])
     turn_history: list[TurnSnapshot] = []
     effects: list[VisualEffect] = []
+    show_tech_tree = False
+    show_debug = False
+    event_scroll = 0
+    event_panel_rect = pygame.Rect(0, 0, 0, 0)
+    tech_btn_rect = pygame.Rect(0, 0, 0, 0)
 
     running = True
     while running:
         clock.tick(60)
 
         if in_setup:
-            red_card, blue_card, start_btn = _draw_setup_screen(
+            red_card, blue_card, rules_btn, start_btn = _draw_setup_screen(
                 screen,
                 width_px,
                 height_px,
@@ -763,6 +1300,7 @@ def run_viewer() -> None:
                 small,
                 red_index,
                 blue_index,
+                collapse_enabled,
             )
             pygame.display.flip()
 
@@ -780,8 +1318,10 @@ def run_viewer() -> None:
                         blue_index = (blue_index - 1) % len(AGENT_SPECS)
                     elif event.key == pygame.K_l:
                         blue_index = (blue_index + 1) % len(AGENT_SPECS)
+                    elif event.key == pygame.K_c:
+                        collapse_enabled = not collapse_enabled
                     elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                        env = AgeGridEnv()
+                        env = AgeGridEnv(config=env.config.__class__(collapse_enabled=collapse_enabled))
                         red_agent = create_agent(AGENT_SPECS[red_index].key, seed=0)
                         blue_agent = create_agent(AGENT_SPECS[blue_index].key, seed=1)
                         red_info = FactionTurnInfo("Red", [])
@@ -794,8 +1334,10 @@ def run_viewer() -> None:
                         red_index = (red_index + 1) % len(AGENT_SPECS)
                     elif blue_card.collidepoint(event.pos):
                         blue_index = (blue_index + 1) % len(AGENT_SPECS)
+                    elif rules_btn.collidepoint(event.pos):
+                        collapse_enabled = not collapse_enabled
                     elif start_btn.collidepoint(event.pos):
-                        env = AgeGridEnv()
+                        env = AgeGridEnv(config=env.config.__class__(collapse_enabled=collapse_enabled))
                         red_agent = create_agent(AGENT_SPECS[red_index].key, seed=0)
                         blue_agent = create_agent(AGENT_SPECS[blue_index].key, seed=1)
                         red_info = FactionTurnInfo("Red", [])
@@ -814,6 +1356,11 @@ def run_viewer() -> None:
                     running = False
                 elif event.key == pygame.K_r:
                     in_setup = True
+                    show_tech_tree = False
+                elif event.key == pygame.K_t:
+                    show_tech_tree = not show_tech_tree
+                elif event.key == pygame.K_d:
+                    show_debug = not show_debug
                 elif event.key == pygame.K_p:
                     snapshot_text = _build_debug_snapshot(
                         env,
@@ -832,6 +1379,11 @@ def run_viewer() -> None:
                         turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
                         effects.extend(_effects_from_actions(env, red_actions, "Red"))
                         effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                        event_scroll = 0
+
+            if event.type == pygame.MOUSEWHEEL and event_panel_rect.width > 0:
+                if event_panel_rect.collidepoint(pygame.mouse.get_pos()):
+                    event_scroll = max(0, event_scroll - event.y)
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if btn_rect.collidepoint(event.pos) and env.winner() is None:
@@ -839,131 +1391,58 @@ def run_viewer() -> None:
                     turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
                     effects.extend(_effects_from_actions(env, red_actions, "Red"))
                     effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                    event_scroll = 0
+                elif tech_btn_rect.collidepoint(event.pos):
+                    show_tech_tree = not show_tech_tree
 
         effects = _update_effects(effects)
-        screen.fill((10, 14, 20))
+        screen.fill((9, 13, 18))
         hud_rect = pygame.Rect(0, 0, width_px, top_bar)
         pygame.draw.rect(screen, HUD_BG, hud_rect)
-        pygame.draw.line(screen, (48, 58, 72), (0, top_bar - 1), (width_px, top_bar - 1), 2)
+        pygame.draw.line(screen, PANEL_SOFT, (0, top_bar - 1), (width_px, top_bar - 1), 2)
         board_x = pad
         sidebar_x = board_x + board_width + pad
         sidebar_rect = pygame.Rect(sidebar_x, pad, side_panel, height_px - pad * 2)
-        pygame.draw.rect(screen, (18, 24, 32), sidebar_rect, border_radius=14)
-        pygame.draw.rect(screen, (54, 66, 82), sidebar_rect, width=2, border_radius=14)
+        _draw_panel(screen, sidebar_rect, fill=(16, 22, 29), border=PANEL_SOFT, radius=16)
 
         red_workers = sum(1 for u in env.units if u.faction == "Red" and u.unit_type == "worker")
         blue_workers = sum(1 for u in env.units if u.faction == "Blue" and u.unit_type == "worker")
         red_military = sum(1 for u in env.units if u.faction == "Red" and u.attack_damage > 0)
         blue_military = sum(1 for u in env.units if u.faction == "Blue" and u.attack_damage > 0)
-        red_defense_mode = defense_mode_active(env, "Red")
-        blue_defense_mode = defense_mode_active(env, "Blue")
-        red_push_mode = push_mode_active(env, "Red")
-        blue_push_mode = push_mode_active(env, "Blue")
-        red_techs = ", ".join(_tech_label(tech_id) for tech_id in sorted(env.faction_state("Red").techs_unlocked)) or "-"
-        blue_techs = ", ".join(_tech_label(tech_id) for tech_id in sorted(env.faction_state("Blue").techs_unlocked)) or "-"
-        red_buildings = ", ".join(sorted(b.building_type for b in env.buildings if b.faction == "Red" and b.hp > 0)) or "-"
-        blue_buildings = ", ".join(sorted(b.building_type for b in env.buildings if b.faction == "Blue" and b.hp > 0)) or "-"
         winner = env.winner()
 
-        _draw_shadow_text(
-            screen,
-            big,
-            f"Turn {env.turn} | Current: {env.factions[env.current_player]} | Winner: {winner or '-'}",
-            board_x,
-            pad,
-            (240, 240, 240),
-            shadow=(5, 8, 12),
-        )
+        top_bar_rect = pygame.Rect(board_x, pad, board_width, 96)
+        _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner)
 
-        red_panel = pygame.Rect(board_x, pad + 40, board_width // 2 - 8, 192)
-        blue_panel = pygame.Rect(board_x + board_width // 2 + 8, pad + 40, board_width // 2 - 8, 192)
-        for rect, color in ((red_panel, RED_PRIMARY), (blue_panel, BLUE_PRIMARY)):
-            pygame.draw.rect(screen, (23, 30, 38), rect, border_radius=12)
-            pygame.draw.rect(screen, color, rect, width=2, border_radius=12)
-
-        if red_defense_mode:
-            _draw_status_badge(screen, tiny, "Defense Mode", red_panel.right - 126, red_panel.y + 12, (90, 46, 46), (212, 116, 116), (249, 224, 224))
-        elif red_push_mode:
-            _draw_status_badge(screen, tiny, "Push Mode", red_panel.right - 110, red_panel.y + 12, (58, 78, 44), (156, 202, 118), (235, 247, 226))
-        if blue_defense_mode:
-            _draw_status_badge(screen, tiny, "Defense Mode", blue_panel.right - 126, blue_panel.y + 12, (46, 66, 96), (116, 164, 224), (224, 238, 252))
-        elif blue_push_mode:
-            _draw_status_badge(screen, tiny, "Push Mode", blue_panel.right - 110, blue_panel.y + 12, (58, 78, 44), (156, 202, 118), (235, 247, 226))
-
-        _draw_labeled_block(
-            screen,
-            font,
-            small,
-            f"Red {AGENT_SPECS[red_index].label}",
-            [
-                f"Bank {env.bank['Red']} | Workers {red_workers} | Military {red_military} | Base HP {env.bases['Red'].hp}",
-                f"Techs: {red_techs}",
-                f"Buildings: {red_buildings}",
-                f"Last: {red_info.last_action}",
-                f"Research: {red_info.research}",
-                f"Attack: {red_info.attacks}",
-                f"Log: {', '.join(red_info.log) if red_info.log else '-'}",
-            ],
-            red_panel.x + 12,
-            red_panel.y + 10,
-            red_panel.width - 24,
-            (245, 226, 221),
-            (212, 214, 218),
-        )
-        _draw_labeled_block(
-            screen,
-            font,
-            small,
-            f"Blue {AGENT_SPECS[blue_index].label}",
-            [
-                f"Bank {env.bank['Blue']} | Workers {blue_workers} | Military {blue_military} | Base HP {env.bases['Blue'].hp}",
-                f"Techs: {blue_techs}",
-                f"Buildings: {blue_buildings}",
-                f"Last: {blue_info.last_action}",
-                f"Research: {blue_info.research}",
-                f"Attack: {blue_info.attacks}",
-                f"Log: {', '.join(blue_info.log) if blue_info.log else '-'}",
-            ],
-            blue_panel.x + 12,
-            blue_panel.y + 10,
-            blue_panel.width - 24,
-            (221, 232, 247),
-            (212, 214, 218),
-        )
+        red_mode = "Defense" if defense_mode_active(env, "Red") else "Push" if push_mode_active(env, "Red") else "Field"
+        blue_mode = "Defense" if defense_mode_active(env, "Blue") else "Push" if push_mode_active(env, "Blue") else "Field"
+        red_panel = pygame.Rect(board_x, top_bar_rect.bottom + 12, board_width // 2 - 8, 196)
+        blue_panel = pygame.Rect(board_x + board_width // 2 + 8, top_bar_rect.bottom + 12, board_width // 2 - 8, 196)
+        _draw_player_card(screen, font, small, tiny, red_panel, "Red", AGENT_SPECS[red_index].label, env.bank["Red"], red_workers, red_military, env.bases["Red"].hp, red_mode, unit_composition(env, "Red"), RED_PRIMARY)
+        _draw_player_card(screen, font, small, tiny, blue_panel, "Blue", AGENT_SPECS[blue_index].label, env.bank["Blue"], blue_workers, blue_military, env.bases["Blue"].hp, blue_mode, unit_composition(env, "Blue"), BLUE_PRIMARY)
 
         research_panel_h = _research_panel_height(tiny, env, side_panel - 24)
-        research_panel = pygame.Rect(sidebar_x + 12, btn_rect.bottom + 78, side_panel - 24, research_panel_h)
+        research_panel = pygame.Rect(sidebar_x + 12, pad + 12, side_panel - 24, research_panel_h)
         _draw_research_panel(screen, font, tiny, env, research_panel)
+        tech_btn_rect = pygame.Rect(research_panel.x, research_panel.bottom + 8, 132, 30)
+        _draw_small_button(screen, tiny, tech_btn_rect, "Research Tree", active=show_tech_tree)
 
         tactical_panel_h = _tactical_panel_height(tiny, env, side_panel - 24)
-        tactical_panel = pygame.Rect(sidebar_x + 12, research_panel.bottom + 12, side_panel - 24, tactical_panel_h)
+        tactical_panel = pygame.Rect(sidebar_x + 12, tech_btn_rect.bottom + 10, side_panel - 24, tactical_panel_h)
         _draw_tactical_panel(screen, font, tiny, env, tactical_panel)
 
-        event_panel_h = max(160, sidebar_rect.bottom - pad - (tactical_panel.bottom + 12))
+        event_panel_h = max(170, sidebar_rect.bottom - pad - (tactical_panel.bottom + 12))
         event_panel = pygame.Rect(sidebar_x + 12, tactical_panel.bottom + 12, side_panel - 24, event_panel_h)
-        _draw_event_panel(
-            screen,
-            font,
-            tiny,
-            env.recent_events[-6:],
-            event_panel,
-        )
+        event_panel_rect = event_panel
+        _draw_event_panel(screen, font, tiny, env.recent_events[-14:], event_panel, event_scroll)
 
-        pygame.draw.rect(screen, (46, 54, 66), btn_rect, border_radius=10)
-        border_color = (120, 120, 120) if winner is None else (90, 90, 90)
-        text_color = (245, 245, 245) if winner is None else (170, 170, 170)
-        pygame.draw.rect(screen, border_color, btn_rect, width=2, border_radius=10)
-        btn_label = "Next Turn" if winner is None else "Game Over"
-        _draw_shadow_text(screen, font, btn_label, btn_rect.x + 24, btn_rect.y + 9, text_color, shadow=(12, 14, 18))
-        reset_message = "Press R to return to setup"
         if winner is not None:
-            reset_message = f"{winner} wins - Press R to reset"
-        sidebar_notes = _wrap_lines(reset_message, tiny, side_panel - 32)
-        sidebar_notes.extend(_wrap_lines("Press P for debug dump", tiny, side_panel - 32))
-        _draw_text_block(screen, tiny, sidebar_notes, sidebar_x + 16, btn_rect.y + 52, (190, 196, 202), 18)
+            winner_text = f"{winner} wins"
+            _draw_shadow_text(screen, small, winner_text, btn_rect.x - small.size(winner_text)[0] - 18, btn_rect.y + 12, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
         ox = board_x
         oy = pad + top_bar
+        mouse_pos = pygame.mouse.get_pos()
 
         for y in range(env.config.height):
             for x in range(env.config.width):
@@ -971,6 +1450,19 @@ def run_viewer() -> None:
                 base_color = GRID_BG if (x + y) % 2 == 0 else GRID_ALT
                 pygame.draw.rect(screen, base_color, rect)
                 pygame.draw.rect(screen, GRID_LINE, rect, width=1)
+                if rect.collidepoint(mouse_pos):
+                    hover = pygame.Surface((tile, tile), pygame.SRCALPHA)
+                    hover.fill((*GRID_HOVER, 42))
+                    screen.blit(hover, rect.topleft)
+                    pygame.draw.rect(screen, GRID_HOVER, rect, width=2)
+
+        if board_x <= mouse_pos[0] < board_x + board_width and oy <= mouse_pos[1] < oy + env.config.height * tile:
+            hover_pos = ((mouse_pos[0] - ox) // tile, (mouse_pos[1] - oy) // tile)
+            hover_lines = _hover_tile_lines(env, hover_pos)
+            if hover_lines:
+                tile_rect = pygame.Rect(ox + hover_pos[0] * tile, oy + hover_pos[1] * tile, tile, tile)
+                hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
+                _draw_hover_tile_panel(screen, small, tiny, hover_rect, hover_lines)
 
         visible_special_resources = {
             resource.id
@@ -979,32 +1471,12 @@ def run_viewer() -> None:
             or any(resource.required_tech in env.faction_state(faction).techs_unlocked for faction in env.factions)
         }
         for r in env.resources:
-            if r.remaining <= 0:
-                continue
             if r.id not in visible_special_resources:
                 continue
             x, y = r.position
             cx = ox + x * tile + tile // 2
             cy = oy + y * tile + tile // 2
-            if r.resource_type == "horses":
-                pygame.draw.circle(screen, (89, 74, 42), (cx, cy), 15)
-                pygame.draw.circle(screen, (212, 181, 104), (cx, cy), 11)
-                glyph = "H"
-                amount_color = (246, 228, 180)
-            elif r.resource_type == "stone":
-                pygame.draw.circle(screen, (86, 92, 102), (cx, cy), 15)
-                pygame.draw.circle(screen, (168, 176, 190), (cx, cy), 11)
-                glyph = "S"
-                amount_color = (232, 236, 244)
-            else:
-                pygame.draw.circle(screen, (42, 92, 58), (cx, cy), 15)
-                pygame.draw.circle(screen, RESOURCE_GLOW, (cx, cy), 11)
-                pygame.draw.circle(screen, (220, 245, 196), (cx - 3, cy - 3), 4)
-                glyph = None
-                amount_color = (222, 241, 214)
-            if glyph is not None:
-                _draw_shadow_text(screen, tiny, glyph, cx - 5, cy - 8, (28, 22, 14), shadow=(240, 220, 176), shadow_offset=1)
-            _draw_shadow_text(screen, tiny, str(r.remaining), cx - 8, cy + 10, amount_color, shadow=(16, 28, 18), shadow_offset=1)
+            _draw_resource_icon(screen, r, (cx, cy), tiny)
 
         for faction, base in env.bases.items():
             x, y = base.position
@@ -1022,9 +1494,7 @@ def run_viewer() -> None:
             color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
             pygame.draw.rect(screen, color, rect, border_radius=6)
             pygame.draw.rect(screen, (242, 233, 220), rect, width=2, border_radius=6)
-            roof = [(rect.x + 4, rect.y + 6), (rect.centerx, rect.y - 6), (rect.right - 4, rect.y + 6)]
-            pygame.draw.polygon(screen, (86, 58, 42), roof)
-            _draw_shadow_text(screen, small, b.building_type[0].upper(), rect.x + 10, rect.y + 8, (24, 24, 24), shadow=(230, 220, 210), shadow_offset=1)
+            _draw_building_icon(screen, b, rect, RED_PRIMARY if b.faction == "Red" else BLUE_PRIMARY)
 
         for u in env.units:
             x, y = u.position
@@ -1032,29 +1502,19 @@ def run_viewer() -> None:
             cy = oy + y * tile + tile // 2
             color = (242, 206, 142) if u.faction == "Red" else (189, 225, 255)
             border = RED_PRIMARY if u.faction == "Red" else BLUE_PRIMARY
-            if u.unit_type == "worker":
-                points = [(cx, cy - 13), (cx + 12, cy), (cx, cy + 13), (cx - 12, cy)]
-                pygame.draw.polygon(screen, color, points)
-                pygame.draw.polygon(screen, border, points, width=2)
-            elif u.unit_type == "soldier":
-                points = [(cx, cy - 14), (cx + 13, cy - 2), (cx + 8, cy + 14), (cx - 8, cy + 14), (cx - 13, cy - 2)]
-                pygame.draw.polygon(screen, color, points)
-                pygame.draw.polygon(screen, border, points, width=2)
-            elif u.unit_type == "horseman":
-                points = [(cx, cy - 14), (cx + 14, cy - 6), (cx + 10, cy + 12), (cx - 2, cy + 15), (cx - 14, cy + 4), (cx - 10, cy - 10)]
-                pygame.draw.polygon(screen, color, points)
-                pygame.draw.polygon(screen, border, points, width=2)
-            else:
-                pygame.draw.circle(screen, color, (cx, cy), 13)
-                pygame.draw.circle(screen, border, (cx, cy), 13, width=2)
-            label = "W" if u.unit_type == "worker" else ("H" if u.unit_type == "horseman" else u.unit_type[0].upper())
-            _draw_shadow_text(screen, small, label, cx - 5, cy - 8, (18, 18, 18), shadow=(236, 236, 236), shadow_offset=1)
-            if u.attack_damage > 0:
-                pygame.draw.line(screen, border, (cx + 10, cy - 10), (cx + 18, cy - 18), 3)
-                pygame.draw.line(screen, border, (cx + 13, cy - 20), (cx + 18, cy - 18), 2)
-                pygame.draw.line(screen, border, (cx + 18, cy - 18), (cx + 16, cy - 13), 2)
+            _draw_unit_icon(screen, u, (cx, cy), color, border)
 
         _draw_effects(screen, effects, ox, oy, tile, small)
+
+        if show_debug:
+            debug_rect = pygame.Rect(board_x, height_px - 44, 258, 30)
+            pygame.draw.rect(screen, (16, 22, 30), debug_rect, border_radius=10)
+            pygame.draw.rect(screen, PANEL_SOFT, debug_rect, width=1, border_radius=10)
+            _draw_text_block(screen, tiny, ["Debug: D   Snapshot: P   Tech tree: T   Reset: R"], debug_rect.x + 10, debug_rect.y + 7, TEXT_MUTED, 16)
+
+        if show_tech_tree:
+            overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
+            _draw_tech_tree_overlay(screen, font, tiny, env, overlay_rect)
 
         pygame.display.flip()
 

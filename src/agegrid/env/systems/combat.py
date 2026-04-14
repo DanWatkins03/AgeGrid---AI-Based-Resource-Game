@@ -10,6 +10,18 @@ def _structure_target_priority(structure_pos: tuple[int, int], unit) -> tuple[in
     return (threat_rank, unit.hp, _distance(structure_pos, unit.position))
 
 
+def _structure_attack_stats(env, building) -> tuple[int, int]:
+    damage = building.attack_damage
+    attack_range = building.attack_range
+    techs = env.faction_state(building.faction).techs_unlocked
+    if building.building_type == "archer_tower" and "fortification" in techs:
+        damage += 1
+    if building.building_type == "ballista_tower" and "fortification" in techs:
+        damage += 1
+        attack_range += 1
+    return damage, attack_range
+
+
 def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
     attacker = next((u for u in env.units if u.id == attacker_id), None)
     target = next((u for u in env.units if u.id == target_id), None)
@@ -19,6 +31,8 @@ def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
     if attacker.faction != faction or target.faction == faction:
         return False
     if attacker.attack_damage <= 0 or attacker.attack_range <= 0:
+        return False
+    if target.unit_type == "worker" and env.turn < env.config.worker_peace_until_turn:
         return False
 
     distance = abs(attacker.position[0] - target.position[0]) + abs(attacker.position[1] - target.position[1])
@@ -44,6 +58,8 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
         return False
     if attacker.attack_damage <= 0 or attacker.attack_range <= 0:
         return False
+    if env.turn < env.config.base_peace_until_turn:
+        return False
 
     distance = abs(attacker.position[0] - target_base.position[0]) + abs(attacker.position[1] - target_base.position[1])
     if distance > attacker.attack_range:
@@ -59,6 +75,10 @@ def _base_attack_stats(env, faction: str) -> tuple[int, int]:
     attack_range = env.config.base_attack_range
     if "masonry" in state.techs_unlocked:
         damage += env.config.masonry_base_attack_bonus
+    if "fortification" in state.techs_unlocked:
+        damage += 1
+    if "engineering" in state.techs_unlocked:
+        attack_range += 1
     return damage, attack_range
 
 
@@ -84,13 +104,14 @@ def resolve_defensive_fire(env, faction: str) -> list[str]:
     for building in env.buildings:
         if building.faction != faction or building.hp <= 0 or building.attack_damage <= 0 or building.attack_range <= 0:
             continue
+        building_damage, building_range = _structure_attack_stats(env, building)
         current_targets = [
-            unit for unit in env.units if unit.faction != faction and _distance(building.position, unit.position) <= building.attack_range
+            unit for unit in env.units if unit.faction != faction and _distance(building.position, unit.position) <= building_range
         ]
         if not current_targets:
             continue
         target = min(current_targets, key=lambda unit: _structure_target_priority(building.position, unit))
-        target.hp -= building.attack_damage
+        target.hp -= building_damage
         if target.hp <= 0:
             env._remove_unit(target.id)
             events.append(

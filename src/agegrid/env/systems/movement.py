@@ -20,6 +20,37 @@ _NEIGHBOR_ORDER: tuple[tuple[str, Position], ...] = (
     ("up", (0, -1)),
 )
 
+
+def _approach_positions(target: Position, include_diagonals: bool = False) -> list[Position]:
+    x, y = target
+    positions = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+    if include_diagonals:
+        positions.extend(
+            [
+                (x + 1, y + 1),
+                (x - 1, y + 1),
+                (x + 1, y - 1),
+                (x - 1, y - 1),
+            ]
+        )
+    return positions
+
+
+def _resolved_target(env, unit, target: Position) -> Position | None:
+    occupied = env._occupied_positions() - {unit.position}
+    if target not in occupied:
+        return target
+
+    include_diagonals = any(base.position == target for base in env.bases.values())
+    candidates = [
+        pos
+        for pos in _approach_positions(target, include_diagonals=include_diagonals)
+        if env._in_bounds(pos) and pos not in occupied
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda pos: abs(unit.position[0] - pos[0]) + abs(unit.position[1] - pos[1]))
+
 # Moves the unit, verifies its a legal move
 def move_unit(env, unit_id: int, direction: str) -> bool:
     unit = next((u for u in env.units if u.id == unit_id), None)
@@ -65,15 +96,18 @@ def can_move_towards(env, unit_id: int, target: Position) -> bool:
     unit = next((u for u in env.units if u.id == unit_id), None)
     if unit is None:
         return False
+    resolved_target = _resolved_target(env, unit, target)
+    if resolved_target is None:
+        return False
     probe_position = unit.position
     steps = max(1, getattr(unit, "move_steps", 1))
 
     for _ in range(steps):
-        next_pos = _next_step_toward(env, unit_id, target, start=probe_position)
+        next_pos = _next_step_toward(env, unit_id, resolved_target, start=probe_position)
         if next_pos is None:
             return probe_position != unit.position
         probe_position = next_pos
-        if probe_position == target:
+        if probe_position == resolved_target:
             return True
     return probe_position != unit.position
 
@@ -120,15 +154,18 @@ def move_towards(env, unit_id: int, target: Position) -> bool:
     unit = next((u for u in env.units if u.id == unit_id), None)
     if unit is None:
         return False
+    resolved_target = _resolved_target(env, unit, target)
+    if resolved_target is None:
+        return False
 
     moved = False
     for _ in range(max(1, getattr(unit, "move_steps", 1))):
-        next_pos = _next_step_toward(env, unit_id, target)
+        next_pos = _next_step_toward(env, unit_id, resolved_target)
         if next_pos is None:
             break
         unit.position = next_pos
         moved = True
-        if unit.position == target:
+        if unit.position == resolved_target:
             break
     return moved
 

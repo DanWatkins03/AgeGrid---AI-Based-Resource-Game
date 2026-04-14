@@ -19,7 +19,11 @@ class GameConfig:
     height: int = 14
     # Game turn configs
     max_turns: int = 200
-    actions_per_turn: int = 3
+    actions_per_turn: int = 4
+    start_year: int = -3000
+    years_per_turn: int = 25
+    worker_peace_until_turn: int = 20
+    base_peace_until_turn: int = 20
     # Designed to limit agents from randomly guessing
     max_attempts_per_turn: int = 10 
 
@@ -35,6 +39,9 @@ class GameConfig:
     horse_resource_nodes: int = 2
     horse_resource_amount: int = 50
     worker_gather_amount: int = 5
+    unit_heal_per_turn: int = 1
+    unit_heal_near_base_bonus: int = 1
+    unit_heal_base_radius: int = 3
     seed: int = 42
 
     # Multiple workers
@@ -43,7 +50,8 @@ class GameConfig:
 
     # Win Conditions
     # Eventually add more like money win, combat win etc.
-    target_bank: int = 200 # Temp resource win
+    target_bank: int | None = None
+    collapse_enabled: bool = True
 
 
 class AgeGridEnv:
@@ -72,6 +80,7 @@ class AgeGridEnv:
         self.current_events: list[str] = []
         self.recent_events: list[str] = []
         self.free_research_used: bool = False
+        self.attacked_unit_ids: set[int] = set()
 
         self.reset()
 
@@ -234,6 +243,20 @@ class AgeGridEnv:
         combat_units = [u for u in units if u.attack_damage > 0]
         enemy_units = [u for u in self.units if u.faction != faction]
         enemy_base_positions = [base.position for name, base in self.bases.items() if name != faction]
+        enemy_base_approach_positions: list[Position] = []
+        for base_x, base_y in enemy_base_positions:
+            for pos in (
+                (base_x + 1, base_y),
+                (base_x - 1, base_y),
+                (base_x, base_y + 1),
+                (base_x, base_y - 1),
+                (base_x + 1, base_y + 1),
+                (base_x - 1, base_y + 1),
+                (base_x + 1, base_y - 1),
+                (base_x - 1, base_y - 1),
+            ):
+                if self._in_bounds(pos):
+                    enemy_base_approach_positions.append(pos)
         friendly_guard_positions = [self.bases[faction].position]
         friendly_guard_positions.extend(worker.position for worker in workers)
         friendly_guard_positions.extend(unit.position for unit in combat_units)
@@ -285,6 +308,9 @@ class AgeGridEnv:
             for pos in enemy_base_positions:
                 if movement.can_move_towards(self, attacker.id, pos):
                     action_set.add(("move_towards", attacker.id, pos))
+            for pos in enemy_base_approach_positions:
+                if movement.can_move_towards(self, attacker.id, pos):
+                    action_set.add(("move_towards", attacker.id, pos))
             for pos in friendly_guard_positions:
                 if pos != attacker.position and movement.can_move_towards(self, attacker.id, pos):
                     action_set.add(("move_towards", attacker.id, pos))
@@ -293,13 +319,15 @@ class AgeGridEnv:
                 if target.faction == faction:
                     continue
                 distance = abs(attacker.position[0] - target.position[0]) + abs(attacker.position[1] - target.position[1])
-                if distance <= attacker.attack_range:
+                if distance <= attacker.attack_range and (
+                    target.unit_type != "worker" or self.turn >= self.config.worker_peace_until_turn
+                ):
                     action_set.add(("attack", attacker.id, target.id))
             for target_faction, base in self.bases.items():
                 if target_faction == faction:
                     continue
                 distance = abs(attacker.position[0] - base.position[0]) + abs(attacker.position[1] - base.position[1])
-                if distance <= attacker.attack_range:
+                if distance <= attacker.attack_range and self.turn >= self.config.base_peace_until_turn:
                     action_set.add(("attack_base", attacker.id, target_faction))
 
         return sorted(action_set, key=str)
@@ -313,9 +341,23 @@ class AgeGridEnv:
         self.attempts_left = self.config.max_attempts_per_turn
         self.current_events = []
         self.free_research_used = False
+        self.attacked_unit_ids = set()
 
     def _current_faction(self) -> str:
         return self.factions[self.current_player]
+
+    def unit_max_hp(self, unit: Unit) -> int:
+        return production.unit_stats(self, unit.faction, unit.unit_type).hp
+
+    def heal_amount_for(self, unit: Unit) -> int:
+        amount = self.config.unit_heal_per_turn
+        if (
+            abs(unit.position[0] - self.bases[unit.faction].position[0])
+            + abs(unit.position[1] - self.bases[unit.faction].position[1])
+            <= self.config.unit_heal_base_radius
+        ):
+            amount += self.config.unit_heal_near_base_bonus
+        return amount
 
     def apply_action(self, action: Action | tuple) -> tuple[bool, str]:
         """
@@ -416,6 +458,7 @@ class AgeGridEnv:
             target = next((u for u in self.units if u.id == target_id), None)
             ok = combat.attack(self, faction, action[1], action[2])
             if ok:
+                self.attacked_unit_ids.add(action[1])
                 self.actions_left -= 1
                 if target is not None and target.hp <= 0:
                     self._record_event(f"{faction} unit#{attacker_id} defeated {target.faction} {target.unit_type}#{target_id}")
@@ -431,6 +474,7 @@ class AgeGridEnv:
             target_faction = action[2]
             ok = combat.attack_base(self, faction, attacker_id, target_faction)
             if ok:
+                self.attacked_unit_ids.add(attacker_id)
                 self.actions_left -= 1
                 base_hp = self.bases[target_faction].hp
                 if base_hp == 0:
@@ -515,6 +559,27 @@ class AgeGridEnv:
         if income > 0:
             self._record_event(f"{faction} gained {income} passive income")
 
+        healed_units: list[str] = []
+        enemy = next(name for name in self.factions if name != faction)
+        for unit in self.units:
+            if unit.faction != faction or unit.hp <= 0 or unit.id in self.attacked_unit_ids:
+                continue
+            if any(
+                other.faction == enemy and other.attack_damage > 0 and abs(other.position[0] - unit.position[0]) + abs(other.position[1] - unit.position[1]) <= 1
+                for other in self.units
+            ):
+                continue
+            max_hp = self.unit_max_hp(unit)
+            if unit.hp >= max_hp:
+                continue
+            healed = min(self.heal_amount_for(unit), max_hp - unit.hp)
+            if healed <= 0:
+                continue
+            unit.hp += healed
+            healed_units.append(f"{faction} {unit.unit_type}#{unit.id} recovered {healed} hp")
+        for event in healed_units:
+            self._record_event(event)
+
         self.current_player = 1 - self.current_player
         if self.current_player == 0:
             self.turn += 1
@@ -523,6 +588,27 @@ class AgeGridEnv:
     def winner(self) -> str | None:
         return victory.winner(self)
 
+    def current_year(self) -> int:
+        return self.config.start_year + self.turn * self.config.years_per_turn
+
+    def current_era(self) -> str:
+        unlocked = set().union(*(state.techs_unlocked for state in self.faction_states.values()))
+        if "engineering" in unlocked:
+            return "Engineering Age"
+        if unlocked.intersection({"iron_working", "fortification", "stirrups", "fletching"}):
+            return "Iron Age"
+        if unlocked.intersection({"bronze_working", "masonry", "horsemanship"}):
+            return "Bronze Age"
+        if "mining" in unlocked:
+            return "Stone Age"
+        return "Founding Age"
+
+    def formatted_year(self) -> str:
+        year = self.current_year()
+        if year < 0:
+            return f"{abs(year)} BCE"
+        return f"{year} CE"
+
     def summary(self) -> str:
         unit_summary = ", ".join(f"{u.faction} {u.unit_type}#{u.id} @ {u.position}" for u in self.units)
         tech_summary = " | ".join(
@@ -530,7 +616,7 @@ class AgeGridEnv:
             for f in self.factions
         )
         lines = [
-            f"Turn: {self.turn}/{self.config.max_turns} | Current: {self.factions[self.current_player]}",
+            f"Turn: {self.turn}/{self.config.max_turns} | Year: {self.formatted_year()} | Era: {self.current_era()} | Current: {self.factions[self.current_player]}",
             f"Red base @ {self.bases['Red'].position} HP={self.bases['Red'].hp} | Bank={self.bank['Red']}",
             f"Blue base @ {self.bases['Blue'].position} HP={self.bases['Blue'].hp} | Bank={self.bank['Blue']}",
             f"Resources: {len(self.resources)} nodes",

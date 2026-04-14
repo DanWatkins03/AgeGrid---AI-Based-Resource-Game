@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 
 from src.agegrid.env.entities import Position
 
@@ -73,7 +74,7 @@ BUILDING_DEFS: dict[str, BuildingDefinition] = {
         required_tech="horsemanship",
         required_resource_adjacent="horses",
     ),
-    "turret": BuildingDefinition(
+    "archer_tower": BuildingDefinition(
         cost=42,
         hp=22,
         attack_damage=3,
@@ -81,7 +82,41 @@ BUILDING_DEFS: dict[str, BuildingDefinition] = {
         required_tech="masonry",
         required_building="quarry",
     ),
+    "ballista_tower": BuildingDefinition(
+        cost=62,
+        hp=28,
+        attack_damage=5,
+        attack_range=4,
+        required_tech="engineering",
+        required_building="archer_tower",
+    ),
 }
+
+
+def unit_stats(env, faction: str, unit_type: str) -> UnitDefinition | None:
+    spec = UNIT_DEFS.get(unit_type)
+    if spec is None:
+        return None
+    techs = env.faction_state(faction).techs_unlocked
+    if unit_type == "soldier" and "iron_working" in techs:
+        return replace(spec, hp=spec.hp + 2, attack_damage=spec.attack_damage + 1)
+    if unit_type == "archer" and "engineering" in techs:
+        return replace(spec, hp=spec.hp + 1, attack_range=spec.attack_range + 1)
+    if unit_type == "horseman" and "stirrups" in techs:
+        return replace(spec, hp=spec.hp + 2, attack_damage=spec.attack_damage + 1, move_steps=spec.move_steps + 1)
+    return spec
+
+
+def building_stats(env, faction: str, building_type: str) -> BuildingDefinition | None:
+    spec = BUILDING_DEFS.get(building_type)
+    if spec is None:
+        return None
+    techs = env.faction_state(faction).techs_unlocked
+    if building_type == "archer_tower" and "fortification" in techs:
+        return replace(spec, hp=spec.hp + 4, attack_damage=spec.attack_damage + 1)
+    if building_type == "ballista_tower" and "fortification" in techs:
+        return replace(spec, hp=spec.hp + 4, attack_damage=spec.attack_damage + 1, attack_range=spec.attack_range + 1)
+    return spec
 
 
 def _can_afford(env, faction: str, cost: int) -> bool:
@@ -109,7 +144,7 @@ def _adjacent_spawn_positions(env, faction: str) -> list[Position]:
 
 
 def can_train_unit(env, faction: str, unit_type: str) -> bool:
-    spec = UNIT_DEFS.get(unit_type)
+    spec = unit_stats(env, faction, unit_type)
     if spec is None:
         return False
     cost = env.config.worker_spawn_cost if unit_type == "worker" else spec.cost
@@ -129,7 +164,7 @@ def can_train_unit(env, faction: str, unit_type: str) -> bool:
 
 
 def train_unit(env, faction: str, unit_type: str) -> bool:
-    spec = UNIT_DEFS.get(unit_type)
+    spec = unit_stats(env, faction, unit_type)
     if spec is None or not can_train_unit(env, faction, unit_type):
         return False
 
@@ -156,7 +191,7 @@ def spawn_worker(env, faction: str) -> bool:
 
 
 def can_build(env, faction: str, worker_id: int, building_type: str, pos: Position) -> bool:
-    spec = BUILDING_DEFS.get(building_type)
+    spec = building_stats(env, faction, building_type)
     worker = next((u for u in env.units if u.id == worker_id), None)
     if spec is None or worker is None:
         return False
@@ -188,7 +223,7 @@ def can_build(env, faction: str, worker_id: int, building_type: str, pos: Positi
 
 
 def build(env, faction: str, worker_id: int, building_type: str, pos: Position) -> bool:
-    spec = BUILDING_DEFS.get(building_type)
+    spec = building_stats(env, faction, building_type)
     if spec is None or not can_build(env, faction, worker_id, building_type, pos):
         return False
 
