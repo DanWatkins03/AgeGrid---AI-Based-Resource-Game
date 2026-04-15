@@ -12,6 +12,9 @@ BuildAction: TypeAlias = tuple[Literal["build"], int, str, Position]
 ResearchAction: TypeAlias = tuple[Literal["research"], str]
 AttackAction: TypeAlias = tuple[Literal["attack"], int, int]
 AttackBaseAction: TypeAlias = tuple[Literal["attack_base"], int, str]
+DeclareWarAction: TypeAlias = tuple[Literal["declare_war"], str]
+OfferPeaceAction: TypeAlias = tuple[Literal["offer_peace"], str, int]
+AcceptPeaceAction: TypeAlias = tuple[Literal["accept_peace"], str]
 
 Action: TypeAlias = (
     GatherAction
@@ -22,4 +25,7 @@ Action: TypeAlias = (
     | ResearchAction
     | AttackAction
     | AttackBaseAction
+    | DeclareWarAction
+    | OfferPeaceAction
+    | AcceptPeaceAction
 )

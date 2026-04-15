@@ -1,22 +1,23 @@
 # AgeGrid - AI Strategy Sandbox
 
-AgeGrid is a lightweight turn-based strategy simulation built to explore AI decision-making in a Civilization-inspired environment.
+AgeGrid is a lightweight turn-based strategy sandbox for exploring AI decision-making in a Civilization-inspired ruleset.
 
-The project focuses on resource management, tech progression, production, combat, and agent benchmarking inside a deterministic grid world. It is designed as both a portfolio project and a sandbox for experimenting with heuristic and, later, learning-based agents.
+The project combines economy, tech progression, production, combat, diplomacy, and agent benchmarking inside a deterministic strategy environment. It is designed both as a portfolio project and as a practical sandbox for building and testing heuristic agents before moving into more advanced search or learning-based approaches.
 
 ## Current Features
 
-- Symmetric grid map generation
-- Two factions with bases, workers, and military units
-- Per-turn action limits for both factions
-- Resource gathering and passive economic scaling through buildings
-- Tech progression with unlock requirements
-- Building and unit production systems
-- Unit combat and base destruction victory condition
-- Pluggable agent system with `Random`, `Greedy`, and `Heuristic` agents
-- Pygame viewer with faction agent selection and turn-by-turn stepping
+- Staggered hex-grid board with centered tile, object, and character rendering
+- Symmetric map generation with resources, bases, and production buildings
+- Two playable factions with workers, soldiers, archers, and horsemen
+- Resource gathering, passive income, and economy scaling through buildings
+- Tech progression with unlock chains, military upgrades, and era tracking
+- Building and unit production systems with terrain/resource requirements
+- Combat, base destruction, collapse handling, and recovery behavior
+- Lightweight diplomacy layer with `Peace`, `War`, and `Truce`
+- Heuristic AI with rally, push, siege, defense, rebuild, and recovery behaviors
+- Pygame viewer with agent selection, inspect panels, zoom, pan, and debug snapshot export
 - Headless simulation runner for agent benchmarking
-- Automated tests covering progression, movement, combat, and victory flow
+- Automated regression tests covering progression, movement, combat, diplomacy, and heuristic behavior
 
 ## Project Structure
 
@@ -90,6 +91,11 @@ In match:
 
 - `Space` or `Enter` advances one full turn
 - Click `Next Turn` to advance one full turn
+- Left click selects units, buildings, bases, and resources to open inspect panels
+- Mouse wheel zooms the board in and out
+- Middle mouse drag pans the camera
+- Middle click resets the camera to the default centered view
+- Use the on-board `Reset` button to reset the camera
 - `P` writes a debug snapshot to `agegrid_debug_snapshot.txt`
 - `R` returns to the setup screen
 - `Esc` closes the viewer
@@ -98,7 +104,18 @@ In match:
 
 - `Random`: chooses randomly from currently legal actions
 - `Greedy`: follows a simple economy-first progression strategy
-- `Heuristic`: researches, builds, trains, and attacks with a more structured priority system
+- `Heuristic`: researches, builds, declares war, defends, rallies, sieges, and recovers using a structured priority system
+
+## Visuals
+
+The current viewer is built around a presentable prototype-style strategy board rather than pure debug rendering. It includes:
+
+- hex-tile terrain rendering
+- object and building sprites
+- character sprites for units with tech-based visual upgrades
+- hover and selection highlights
+- inspect panels for units, resources, buildings, and bases
+- camera zoom and panning for browsing the board
 
 ## Why This Project Exists
 
@@ -115,13 +132,22 @@ That makes it useful for:
 
 Planned improvements include:
 
-- stronger military and economic balance
-- richer unit and building types
-- better tactical decision-making and pathfinding
+- stronger military, diplomacy, and economy balance
+- more factions and broader multi-team support
+- richer unit, building, and world-object types
+- better tactical coordination and long-match pacing
 - cleaner observation interfaces for agents
 - more benchmark scenarios and evaluation metrics
 - reinforcement learning or self-play experiments
 
+## Asset Credits
+
+AgeGrid uses Kenney-style game assets from local project asset packs for board tiles, objects, UI, and character visuals.
+
+- Kenney
+- Public-domain / free game art asset packs used through the local `assets/` folders in this project
+- Website: [https://kenney.nl/](https://kenney.nl/)
+
 ## Status
 
-Active prototype with working simulation, viewer, agent baselines, and tests.
+Active prototype with a working simulation, hex-based viewer, diplomacy-enabled heuristic agents, and a growing regression test suite.

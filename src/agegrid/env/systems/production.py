@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 
 from src.agegrid.env.entities import Position
+from src.agegrid.env import hexgrid
 
 
 @dataclass(frozen=True)
@@ -135,12 +136,7 @@ def _has_required_building(env, faction: str, required_building: str | None) -> 
 
 def _adjacent_spawn_positions(env, faction: str) -> list[Position]:
     base_pos = env.bases[faction].position
-    return [
-        (base_pos[0] + 1, base_pos[1]),
-        (base_pos[0] - 1, base_pos[1]),
-        (base_pos[0], base_pos[1] + 1),
-        (base_pos[0], base_pos[1] - 1),
-    ]
+    return hexgrid.neighbors(base_pos)
 
 
 def can_train_unit(env, faction: str, unit_type: str) -> bool:
@@ -203,17 +199,12 @@ def can_build(env, faction: str, worker_id: int, building_type: str, pos: Positi
         return False
     if not _has_required_building(env, faction, spec.required_building):
         return False
-    if abs(worker.position[0] - pos[0]) + abs(worker.position[1] - pos[1]) != 1:
+    if hexgrid.distance(worker.position, pos) != 1:
         return False
     if not env._in_bounds(pos) or pos in env._occupied_positions() or pos in {b.position for b in env.buildings}:
         return False
     if spec.required_resource_adjacent is not None:
-        adjacent_resources = [
-            env.resource_at_for_faction((pos[0] + 1, pos[1]), faction),
-            env.resource_at_for_faction((pos[0] - 1, pos[1]), faction),
-            env.resource_at_for_faction((pos[0], pos[1] + 1), faction),
-            env.resource_at_for_faction((pos[0], pos[1] - 1), faction),
-        ]
+        adjacent_resources = [env.resource_at_for_faction(neighbor, faction) for neighbor in hexgrid.neighbors(pos)]
         if not any(
             resource is not None and resource.resource_type == spec.required_resource_adjacent
             for resource in adjacent_resources

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import pygame
@@ -15,7 +16,10 @@ from src.agegrid.agents.heuristic import (
 )
 from src.agegrid.agents.registry import AGENT_SPECS, create_agent
 from src.agegrid.env.agegrid_env import AgeGridEnv
+from src.agegrid.env import hexgrid
 from src.agegrid.env.systems import tech
+from src.agegrid.env.systems import production
+from src.agegrid.ui.assets import BoardAssets
 
 
 @dataclass
@@ -58,9 +62,20 @@ TEXT_SECONDARY = (170, 179, 190)
 TEXT_MUTED = (127, 137, 149)
 GRID_BG = (24, 30, 38)
 GRID_ALT = (28, 35, 43)
-GRID_LINE = (52, 62, 74)
-GRID_HOVER = (108, 124, 146)
+GRID_LINE = (61, 72, 84)
+GRID_HOVER = (188, 214, 234)
 RESOURCE_GLOW = (109, 192, 116)
+HEX_HOVER_FILL = (176, 206, 230)
+HEX_SELECT_FILL = (245, 216, 120)
+HEX_SELECT_LINE = (250, 234, 167)
+BOARD_SHADOW = (6, 9, 13)
+BASE_HEX_SIZE = 31
+HEX_SIZE = BASE_HEX_SIZE
+HEX_WIDTH = round(math.sqrt(3) * HEX_SIZE)
+HEX_HEIGHT = HEX_SIZE * 2
+MIN_ZOOM = 0.75
+MAX_ZOOM = 2.0
+ZOOM_STEP = 0.12
 
 TECH_ICON_STYLES = {
     "mining": {"label": "M", "bg": (79, 121, 82), "fg": (232, 245, 220)},
@@ -116,6 +131,41 @@ BUILDING_HELP = {
     "ballista_tower": "Late defensive siege tower",
 }
 
+UNIT_LABELS = {
+    "worker": "Worker",
+    "soldier": "Soldier",
+    "archer": "Archer",
+    "horseman": "Horseman",
+}
+
+UNIT_HELP = {
+    "worker": "Economic unit that gathers resources and constructs buildings.",
+    "soldier": "Frontline melee fighter used to hold territory and pressure bases.",
+    "archer": "Ranged support unit that softens targets before they can answer back.",
+    "horseman": "Fast cavalry raider that can flank, chase, and punish exposed units.",
+}
+
+RESOURCE_LABELS = {
+    "ore": "Ore Vein",
+    "stone": "Stone Deposit",
+    "horses": "Horse Herd",
+}
+
+RESOURCE_HELP = {
+    "ore": "Basic gatherable resource node that feeds your economy.",
+    "stone": "Strategic node used for quarry and fortification progression.",
+    "horses": "Strategic node that unlocks cavalry infrastructure and horsemen.",
+}
+
+
+def _set_hex_zoom(zoom: float) -> float:
+    global HEX_SIZE, HEX_WIDTH, HEX_HEIGHT
+    clamped = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+    HEX_SIZE = max(18, round(BASE_HEX_SIZE * clamped))
+    HEX_WIDTH = round(math.sqrt(3) * HEX_SIZE)
+    HEX_HEIGHT = HEX_SIZE * 2
+    return HEX_SIZE / BASE_HEX_SIZE
+
 
 def _tech_label(tech_id: str) -> str:
     return TECH_LABELS.get(tech_id, tech_id.replace("_", " ").title())
@@ -149,7 +199,7 @@ def _format_action(action: tuple | None) -> str:
     if kind == "gather":
         return f"gather worker#{action[1]}"
     if kind == "move_towards":
-        return f"move worker/unit#{action[1]} -> {action[2]}"
+        return f"move unit#{action[1]} toward {action[2]}"
     if kind == "spawn_worker":
         return "spawn worker"
     if kind == "train":
@@ -162,10 +212,16 @@ def _format_action(action: tuple | None) -> str:
         return f"attack unit#{action[2]} with unit#{action[1]}"
     if kind == "attack_base":
         return f"attack {action[2]} base with unit#{action[1]}"
+    if kind == "declare_war":
+        return f"declare war on {action[1]}"
+    if kind == "offer_peace":
+        return f"offer peace to {action[1]} for {action[2]}"
+    if kind == "accept_peace":
+        return f"accept peace with {action[1]}"
     return str(action)
 
 
-def _build_turn_info(label: str, actions: list[tuple | None], log: list[str]) -> FactionTurnInfo:
+def _build_turn_info(label: str, actions: list[tuple | None], log: list[str], events: list[str]) -> FactionTurnInfo:
     research = next((_format_action(action) for action in actions if action and action[0] == "research"), "-")
     attacks = next(
         (_format_action(action) for action in actions if action and action[0] in {"attack", "attack_base"}),
@@ -174,7 +230,7 @@ def _build_turn_info(label: str, actions: list[tuple | None], log: list[str]) ->
     return FactionTurnInfo(
         label=label,
         log=log,
-        last_action=_format_action(actions[-1]) if actions else "stop",
+        last_action=events[-1] if events else (_format_action(actions[-1]) if actions else "stop"),
         research=research,
         attacks=attacks,
     )
@@ -190,7 +246,7 @@ def _step_faction_with_trace(env: AgeGridEnv, agent) -> tuple[FactionTurnInfo, l
 
     faction = env.factions[env.current_player]
     log = env.step_faction(decide)
-    return _build_turn_info(faction, actions, log), actions
+    return _build_turn_info(faction, actions, log, list(env.current_events)), actions
 
 
 def _step_full_turn(
@@ -635,7 +691,10 @@ def _research_subsection_height(
 def _tactical_panel_lines(env: AgeGridEnv, faction: str) -> list[str]:
     composition = unit_composition(env, faction)
     mode = "Defense" if defense_mode_active(env, faction) else "Push" if push_mode_active(env, faction) else "Field"
+    enemy = next(name for name in env.factions if name != faction)
+    relation = env.relation_state(faction, enemy).state.title()
     return [
+        f"Diplomacy {relation}",
         f"Threat {threat_level(env, faction)}",
         f"Plan {army_plan(env, faction)} | {mode}",
         f"Army W{composition['worker']} S{composition['soldier']} A{composition['archer']} H{composition['horseman']}",
@@ -704,6 +763,244 @@ def _draw_small_button(
     )
 
 
+def _draw_scaled_sprite(surface: pygame.Surface, sprite: pygame.Surface | None, rect: pygame.Rect) -> bool:
+    if sprite is None:
+        return False
+    scaled = _safe_scale(sprite, rect.size)
+    if scaled is None:
+        return False
+    surface.blit(scaled, rect.topleft)
+    return True
+
+
+def _draw_ui_meter(
+    surface: pygame.Surface,
+    assets: BoardAssets,
+    rect: pygame.Rect,
+    value: int,
+    maximum: int,
+    color_family: str = "red",
+) -> None:
+    maximum = max(1, maximum)
+    fill_ratio = max(0.0, min(1.0, value / maximum))
+    back_rect = rect.copy()
+    if not (
+        _draw_scaled_sprite(surface, assets.ui_sprite("bar_back_left"), pygame.Rect(back_rect.x, back_rect.y, 8, back_rect.height))
+        and _draw_scaled_sprite(surface, assets.ui_sprite("bar_back_mid"), pygame.Rect(back_rect.x + 8, back_rect.y, max(1, back_rect.width - 16), back_rect.height))
+        and _draw_scaled_sprite(surface, assets.ui_sprite("bar_back_right"), pygame.Rect(back_rect.right - 8, back_rect.y, 8, back_rect.height))
+    ):
+        pygame.draw.rect(surface, (155, 129, 89), back_rect, border_radius=9)
+        pygame.draw.rect(surface, (124, 98, 65), back_rect, width=2, border_radius=9)
+
+    fill_width = max(14, round((rect.width - 8) * fill_ratio))
+    fill_rect = pygame.Rect(rect.x + 4, rect.y + 3, min(fill_width, rect.width - 8), rect.height - 6)
+    left = assets.ui_sprite(f"bar_{color_family}_left")
+    mid = assets.ui_sprite(f"bar_{color_family}_mid")
+    right = assets.ui_sprite(f"bar_{color_family}_right")
+    if not (
+        _draw_scaled_sprite(surface, left, pygame.Rect(fill_rect.x, fill_rect.y, 8, fill_rect.height))
+        and _draw_scaled_sprite(surface, mid, pygame.Rect(fill_rect.x + 8, fill_rect.y, max(1, fill_rect.width - 16), fill_rect.height))
+        and _draw_scaled_sprite(surface, right, pygame.Rect(fill_rect.right - 8, fill_rect.y, 8, fill_rect.height))
+    ):
+        fill_color = (232, 100, 58) if color_family == "red" else (84, 175, 224) if color_family == "blue" else (224, 184, 76)
+        pygame.draw.rect(surface, fill_color, fill_rect, border_radius=8)
+
+
+def _selected_unit_lines(env: AgeGridEnv, unit) -> list[str]:
+    spec = production.unit_stats(env, unit.faction, unit.unit_type)
+    label = UNIT_LABELS.get(unit.unit_type, unit.unit_type.replace("_", " ").title())
+    description = UNIT_HELP.get(unit.unit_type, "Military unit.")
+    if spec is None:
+        return [label, description]
+    return [
+        label,
+        description,
+        f"Position {unit.position[0]}, {unit.position[1]}",
+    ]
+
+
+def _selected_resource_lines(resource) -> list[str]:
+    label = RESOURCE_LABELS.get(resource.resource_type, resource.resource_type.replace("_", " ").title())
+    help_text = RESOURCE_HELP.get(resource.resource_type, "Strategic resource node.")
+    extra = "Visible once its required tech is unlocked." if resource.required_tech else "Available to gather immediately."
+    return [
+        label,
+        help_text,
+        extra,
+        f"Remaining {resource.remaining}",
+    ]
+
+
+def _selected_building_lines(env: AgeGridEnv, building) -> list[str]:
+    label = _building_label(building.building_type)
+    help_text = BUILDING_HELP.get(building.building_type, "Faction structure.")
+    spec = production.building_stats(env, building.faction, building.building_type)
+    extras: list[str] = [help_text]
+    if spec is not None and spec.resource_income > 0:
+        extras.append(f"Income +{spec.resource_income} each turn")
+    if spec is not None and spec.attack_damage > 0:
+        extras.append(f"Attack {spec.attack_damage}  Range {spec.attack_range}")
+    extras.append(f"Position {building.position[0]}, {building.position[1]}")
+    return [label, *extras]
+
+
+def _selected_base_lines(base, faction: str) -> list[str]:
+    return [
+        f"{faction} Base",
+        "Primary stronghold. Lose this and the match is over.",
+        f"Position {base.position[0]}, {base.position[1]}",
+    ]
+
+
+def _draw_selected_unit_panel(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    small_font: pygame.font.Font,
+    board_assets: BoardAssets,
+    env: AgeGridEnv,
+    unit,
+    rect: pygame.Rect,
+) -> pygame.Rect:
+    accent = RED_PRIMARY if unit.faction == "Red" else BLUE_PRIMARY
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel"), rect):
+        _draw_panel(surface, rect, fill=(135, 98, 61), border=(193, 149, 98), radius=14)
+    inner = rect.inflate(-18, -22)
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel_inset"), inner):
+        pygame.draw.rect(surface, (216, 193, 144), inner, border_radius=12)
+        pygame.draw.rect(surface, (180, 152, 111), inner, width=2, border_radius=12)
+
+    close_rect = pygame.Rect(inner.right - 22, inner.y + 8, 20, 20)
+    pygame.draw.rect(surface, (133, 143, 158), close_rect, border_radius=6)
+    pygame.draw.rect(surface, (196, 204, 214), close_rect, width=1, border_radius=6)
+    close_sprite = board_assets.ui_sprite("close")
+    if not _draw_scaled_sprite(surface, close_sprite, close_rect.inflate(-3, -3)):
+        pygame.draw.line(surface, TEXT_PRIMARY, (close_rect.x + 5, close_rect.y + 5), (close_rect.right - 5, close_rect.bottom - 5), 2)
+        pygame.draw.line(surface, TEXT_PRIMARY, (close_rect.right - 5, close_rect.y + 5), (close_rect.x + 5, close_rect.bottom - 5), 2)
+
+    icon_center = (inner.x + 38, inner.y + 38)
+    pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
+    if not _draw_unit_sprite(
+        surface,
+        board_assets,
+        env,
+        unit,
+        icon_center,
+        RED_ACCENT if unit.faction == "Red" else BLUE_ACCENT,
+        accent,
+        size=34,
+    ):
+        _draw_unit_icon(surface, unit, icon_center, RED_ACCENT if unit.faction == "Red" else BLUE_ACCENT, accent)
+
+    unit_name = UNIT_LABELS.get(unit.unit_type, unit.unit_type.replace("_", " ").title())
+    _draw_shadow_text(surface, title_font, unit_name, inner.x + 72, inner.y + 10, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+    _draw_shadow_text(
+        surface,
+        body_font,
+        f"{unit.faction} #{unit.id}",
+        inner.x + 72,
+        inner.y + 36,
+        accent,
+        shadow=(10, 12, 16),
+        shadow_offset=1,
+    )
+
+    spec = production.unit_stats(env, unit.faction, unit.unit_type)
+    max_hp = spec.hp if spec is not None else unit.hp
+    health_rect = pygame.Rect(inner.x + 14, inner.y + 74, inner.width - 28, 24)
+    _draw_shadow_text(surface, body_font, f"Health {unit.hp}/{max_hp}", health_rect.x, health_rect.y - 18, TEXT_MUTED, shadow=(10, 12, 16), shadow_offset=1)
+    _draw_ui_meter(surface, board_assets, health_rect, unit.hp, max_hp, color_family="red")
+
+    stat_y = health_rect.bottom + 18
+    attack = spec.attack_damage if spec is not None else unit.attack_damage
+    attack_range = spec.attack_range if spec is not None else unit.attack_range
+    move_steps = spec.move_steps if spec is not None else unit.move_steps
+    stats = [
+        ("Attack", str(attack), (238, 163, 92)),
+        ("Range", str(attack_range), (129, 190, 228)),
+        ("Move", str(move_steps), (165, 213, 122)),
+    ]
+    stat_w = (inner.width - 28 - 10) // 3
+    for idx, (label, value, color) in enumerate(stats):
+        stat_rect = pygame.Rect(inner.x + 14 + idx * (stat_w + 5), stat_y, stat_w, 50)
+        pygame.draw.rect(surface, (142, 107, 72), stat_rect, border_radius=10)
+        pygame.draw.rect(surface, (202, 165, 119), stat_rect, width=2, border_radius=10)
+        _draw_shadow_text(surface, small_font, label, stat_rect.x + 10, stat_rect.y + 6, TEXT_MUTED, shadow=(10, 12, 16), shadow_offset=1)
+        _draw_shadow_text(surface, title_font, value, stat_rect.x + 10, stat_rect.y + 19, color, shadow=(10, 12, 16), shadow_offset=1)
+
+    desc_y = stat_y + 64
+    body_lines = _selected_unit_lines(env, unit)[1:]
+    wrapped: list[str] = []
+    for line in body_lines:
+        wrapped.extend(_wrap_lines(line, body_font, inner.width - 28))
+    _draw_text_block(surface, body_font, wrapped, inner.x + 14, desc_y, (90, 73, 50), 18)
+    return close_rect
+
+
+def _draw_selected_object_panel(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    small_font: pygame.font.Font,
+    board_assets: BoardAssets,
+    env: AgeGridEnv,
+    rect: pygame.Rect,
+    *,
+    title: str,
+    subtitle: str,
+    lines: list[str],
+    hp_value: int | None = None,
+    hp_max: int | None = None,
+    icon_kind: str | None = None,
+    icon_drawer=None,
+    accent: tuple[int, int, int] = TEXT_PRIMARY,
+) -> pygame.Rect:
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel"), rect):
+        _draw_panel(surface, rect, fill=(135, 98, 61), border=(193, 149, 98), radius=14)
+    inner = rect.inflate(-18, -22)
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel_inset"), inner):
+        pygame.draw.rect(surface, (216, 193, 144), inner, border_radius=12)
+        pygame.draw.rect(surface, (180, 152, 111), inner, width=2, border_radius=12)
+
+    close_rect = pygame.Rect(inner.right - 22, inner.y + 8, 20, 20)
+    pygame.draw.rect(surface, (133, 143, 158), close_rect, border_radius=6)
+    pygame.draw.rect(surface, (196, 204, 214), close_rect, width=1, border_radius=6)
+    close_sprite = board_assets.ui_sprite("close")
+    if not _draw_scaled_sprite(surface, close_sprite, close_rect.inflate(-3, -3)):
+        pygame.draw.line(surface, TEXT_PRIMARY, (close_rect.x + 5, close_rect.y + 5), (close_rect.right - 5, close_rect.bottom - 5), 2)
+        pygame.draw.line(surface, TEXT_PRIMARY, (close_rect.right - 5, close_rect.y + 5), (close_rect.x + 5, close_rect.bottom - 5), 2)
+
+    icon_center = (inner.x + 38, inner.y + 38)
+    pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
+    drew_icon = False
+    if icon_kind is not None:
+        sprite = board_assets.object_sprite(icon_kind)
+        if sprite is not None:
+            scaled = _safe_scale(sprite, (36, 36))
+            if scaled is not None:
+                screen_rect = scaled.get_rect(center=(icon_center[0], icon_center[1] + 2))
+                surface.blit(scaled, screen_rect)
+                drew_icon = True
+    if not drew_icon and icon_drawer is not None:
+        icon_drawer(icon_center)
+
+    _draw_shadow_text(surface, title_font, title, inner.x + 72, inner.y + 10, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+    _draw_shadow_text(surface, body_font, subtitle, inner.x + 72, inner.y + 36, accent, shadow=(10, 12, 16), shadow_offset=1)
+
+    body_y = inner.y + 74
+    if hp_value is not None and hp_max is not None:
+        health_rect = pygame.Rect(inner.x + 14, body_y, inner.width - 28, 24)
+        _draw_shadow_text(surface, body_font, f"Health {hp_value}/{hp_max}", health_rect.x, health_rect.y - 18, TEXT_MUTED, shadow=(10, 12, 16), shadow_offset=1)
+        _draw_ui_meter(surface, board_assets, health_rect, hp_value, hp_max, color_family="red")
+        body_y = health_rect.bottom + 18
+
+    wrapped: list[str] = []
+    for line in lines:
+        wrapped.extend(_wrap_lines(line, body_font, inner.width - 28))
+    _draw_text_block(surface, body_font, wrapped, inner.x + 14, body_y, (90, 73, 50), 18)
+    return close_rect
+
+
 def _draw_resource_icon(screen: pygame.Surface, resource, center: tuple[int, int], small_font: pygame.font.Font) -> None:
     cx, cy = center
     if resource.resource_type == "horses":
@@ -768,6 +1065,61 @@ def _draw_building_icon(screen: pygame.Surface, building, rect: pygame.Rect, bor
         pygame.draw.line(screen, border, (tower.centerx + 8, tower.y + 11), (tower.centerx + 14, tower.y + 6), 2)
 
 
+def _unit_visual_tier(env: AgeGridEnv, unit) -> int:
+    techs = env.faction_state(unit.faction).techs_unlocked
+    if unit.unit_type == "worker":
+        if "engineering" in techs:
+            return 2
+        if "mining" in techs or "masonry" in techs:
+            return 1
+        return 0
+    if unit.unit_type == "soldier":
+        if "engineering" in techs or "fortification" in techs:
+            return 2
+        if "iron_working" in techs:
+            return 1
+        return 0
+    if unit.unit_type == "archer":
+        if "engineering" in techs:
+            return 2
+        if "fletching" in techs:
+            return 1
+        return 0
+    if unit.unit_type == "horseman":
+        if "stirrups" in techs and "engineering" in techs:
+            return 2
+        if "stirrups" in techs:
+            return 1
+        return 0
+    return 0
+
+
+def _draw_unit_sprite(
+    screen: pygame.Surface,
+    board_assets: BoardAssets,
+    env: AgeGridEnv,
+    unit,
+    center: tuple[int, int],
+    ring_fill: tuple[int, int, int],
+    ring_border: tuple[int, int, int],
+    size: int = 30,
+) -> bool:
+    sprite = board_assets.character_sprite(unit.unit_type, _unit_visual_tier(env, unit))
+    if sprite is None:
+        return False
+    ring = pygame.Surface((size + 18, size + 18), pygame.SRCALPHA)
+    mid = (ring.get_width() // 2, ring.get_height() // 2 + 1)
+    pygame.draw.circle(ring, (*ring_fill, 58), mid, size // 2 + 6)
+    pygame.draw.circle(ring, (*ring_border, 112), mid, size // 2 + 8, width=2)
+    screen.blit(ring, (center[0] - ring.get_width() // 2, center[1] - ring.get_height() // 2 + 4))
+    scaled = _safe_scale(sprite, (size, size))
+    if scaled is None:
+        return False
+    sprite_rect = scaled.get_rect(center=(center[0], center[1] + 1))
+    screen.blit(scaled, sprite_rect)
+    return True
+
+
 def _draw_unit_icon(screen: pygame.Surface, unit, center: tuple[int, int], fill: tuple[int, int, int], border: tuple[int, int, int]) -> None:
     cx, cy = center
     if unit.unit_type == "worker":
@@ -800,6 +1152,114 @@ def _draw_unit_icon(screen: pygame.Surface, unit, center: tuple[int, int], fill:
     else:
         pygame.draw.circle(screen, fill, (cx, cy), 13)
         pygame.draw.circle(screen, border, (cx, cy), 13, width=2)
+
+
+def _hex_origin(col: int, row: int, board_origin: tuple[int, int]) -> tuple[int, int]:
+    left, top = hexgrid.hex_to_pixel(col, row, HEX_SIZE)
+    return round(board_origin[0] + left), round(board_origin[1] + top)
+
+
+def _hex_center(col: int, row: int, board_origin: tuple[int, int]) -> tuple[int, int]:
+    left, top = _hex_origin(col, row, board_origin)
+    return left + HEX_WIDTH // 2, top
+
+
+def _hex_points(col: int, row: int, board_origin: tuple[int, int]) -> list[tuple[int, int]]:
+    left, top = _hex_origin(col, row, board_origin)
+    return hexgrid.hex_polygon_points(left, top, HEX_SIZE)
+
+
+def _hex_bounds(col: int, row: int, board_origin: tuple[int, int]) -> pygame.Rect:
+    left, top = _hex_origin(col, row, board_origin)
+    return pygame.Rect(left, top - HEX_SIZE, HEX_WIDTH, HEX_HEIGHT)
+
+
+def _board_pixel_size(env: AgeGridEnv) -> tuple[int, int]:
+    max_x = 0.0
+    max_y = 0.0
+    for row in range(env.config.height):
+        for col in range(env.config.width):
+            left, top = hexgrid.hex_to_pixel(col, row, HEX_SIZE)
+            max_x = max(max_x, left + HEX_WIDTH)
+            max_y = max(max_y, top + HEX_SIZE)
+    return math.ceil(max_x), math.ceil(max_y + HEX_SIZE)
+
+
+def _safe_scale(surface: pygame.Surface | None, size: tuple[int, int]) -> pygame.Surface | None:
+    if surface is None:
+        return None
+    return pygame.transform.smoothscale(surface, size)
+
+
+def _blit_centered(surface: pygame.Surface, sprite: pygame.Surface | None, center: tuple[int, int], offset_y: int = 0) -> None:
+    if sprite is None:
+        return
+    rect = sprite.get_rect(center=(center[0], center[1] + offset_y))
+    surface.blit(sprite, rect.topleft)
+
+
+def _blit_bottom_centered(
+    surface: pygame.Surface,
+    sprite: pygame.Surface | None,
+    anchor: tuple[int, int],
+    offset_y: int = 0,
+) -> pygame.Rect | None:
+    if sprite is None:
+        return None
+    rect = sprite.get_rect(midbottom=(anchor[0], anchor[1] + offset_y))
+    surface.blit(sprite, rect.topleft)
+    return rect
+
+
+def _draw_soft_shadow(
+    surface: pygame.Surface,
+    center: tuple[int, int],
+    width: int,
+    height: int,
+    alpha: int = 70,
+) -> None:
+    shadow = pygame.Surface((width, height), pygame.SRCALPHA)
+    pygame.draw.ellipse(shadow, (*BOARD_SHADOW, alpha), shadow.get_rect())
+    surface.blit(shadow, (center[0] - width // 2, center[1] - height // 2))
+
+
+def _terrain_kind(env: AgeGridEnv, pos: tuple[int, int]) -> str:
+    if any(base.position == pos for base in env.bases.values()):
+        return "stone"
+    if any(building.position == pos and building.hp > 0 for building in env.buildings):
+        return "dirt"
+    resource = next((r for r in env.resources if r.position == pos and r.remaining > 0), None)
+    if resource is None:
+        return "grass" if (pos[0] + pos[1]) % 4 else "dirt"
+    if resource.resource_type == "stone":
+        return "stone"
+    if resource.resource_type == "horses":
+        return "sand"
+    return "grass"
+
+
+def _draw_asset_marker(
+    surface: pygame.Surface,
+    sprite: pygame.Surface | None,
+    center: tuple[int, int],
+    fallback,
+    tint: tuple[int, int, int] | None = None,
+    scale: tuple[int, int] = (40, 40),
+    anchor_mode: str = "bottom",
+    offset_y: int = 0,
+) -> None:
+    scaled = _safe_scale(sprite, scale)
+    if scaled is not None:
+        if anchor_mode == "bottom":
+            _blit_bottom_centered(surface, scaled, center, offset_y=offset_y)
+        else:
+            _blit_centered(surface, scaled, center, offset_y=offset_y)
+        if tint is not None:
+            glow = pygame.Surface((scale[0] + 14, scale[1] + 14), pygame.SRCALPHA)
+            pygame.draw.ellipse(glow, (*tint, 42), glow.get_rect(), width=4)
+            surface.blit(glow, (center[0] - glow.get_width() // 2, center[1] - glow.get_height() // 2))
+        return
+    fallback()
 
 
 def _hover_tile_lines(env: AgeGridEnv, pos: tuple[int, int]) -> list[str]:
@@ -842,6 +1302,56 @@ def _draw_hover_tile_panel(
     _draw_panel(surface, rect, fill=(13, 18, 24), border=PANEL_SOFT, radius=10)
     _draw_shadow_text(surface, title_font, lines[0], rect.x + 10, rect.y + 8, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
     _draw_text_block(surface, body_font, lines[1:], rect.x + 10, rect.y + 30, TEXT_SECONDARY, 16)
+
+
+def _board_origin_for_layout(
+    env: AgeGridEnv,
+    board_x: int,
+    top_bar: int,
+    pad: int,
+    height_px: int,
+    board_width: int,
+    board_height: int,
+) -> tuple[int, int]:
+    content_top = pad + top_bar + 8
+    content_bottom = height_px - pad - 18
+    available_height = max(board_height, content_bottom - content_top)
+    origin_y = content_top + max(0, (available_height - board_height) // 2) + HEX_SIZE
+    inner_width = board_width + 28
+    origin_x = board_x + max(0, (board_width - inner_width) // 2) + 8
+    return origin_x, origin_y
+
+
+def _board_origin_in_viewport(
+    viewport: pygame.Rect,
+    board_width: int,
+    board_height: int,
+    pan: tuple[float, float] = (0.0, 0.0),
+) -> tuple[int, int]:
+    origin_x = viewport.x + (viewport.width - board_width) / 2 + pan[0]
+    origin_y = viewport.y + (viewport.height - board_height) / 2 + HEX_SIZE + pan[1]
+    return round(origin_x), round(origin_y)
+
+
+def _clamp_camera_pan(
+    viewport: pygame.Rect,
+    board_width: int,
+    board_height: int,
+    pan: tuple[float, float],
+) -> tuple[float, float]:
+    bleed = 56
+    if board_width <= viewport.width:
+        max_x = bleed
+    else:
+        max_x = (board_width - viewport.width) / 2 + bleed
+    if board_height <= viewport.height:
+        max_y = bleed
+    else:
+        max_y = (board_height - viewport.height) / 2 + bleed
+    return (
+        max(-max_x, min(max_x, pan[0])),
+        max(-max_y, min(max_y, pan[1])),
+    )
 
 
 def _hover_panel_rect(
@@ -975,7 +1485,7 @@ def _draw_tech_tree_overlay(
 
 
 def _tile_center(ox: int, oy: int, tile: int, pos: tuple[int, int]) -> tuple[int, int]:
-    return (ox + pos[0] * tile + tile // 2, oy + pos[1] * tile + tile // 2)
+    return _hex_center(pos[0], pos[1], (ox, oy))
 
 
 def _unit_by_id(env: AgeGridEnv, unit_id: int):
@@ -1059,7 +1569,7 @@ def _draw_effects(
             continue
 
         cx, cy = _tile_center(ox, oy, tile, effect.pos)
-        overlay = pygame.Surface((tile * 2, tile * 2), pygame.SRCALPHA)
+        overlay = pygame.Surface((HEX_WIDTH * 2, HEX_HEIGHT * 2), pygame.SRCALPHA)
         local_center = (overlay.get_width() // 2, overlay.get_height() // 2)
 
         if effect.kind in {"gather", "build", "train"}:
@@ -1192,6 +1702,7 @@ def _build_debug_snapshot(
         f"Year/Era: {env.formatted_year()} / {env.current_era()}",
         f"Current player: {env.factions[env.current_player]}",
         f"Winner: {env.winner() or '-'}",
+        f"Relations: {env.relation_state('Red', 'Blue').state.title()}",
         f"Collapse rule: {'On' if env.config.collapse_enabled else 'Off'}",
         f"Red agent: {red_agent_label}",
         f"Blue agent: {blue_agent_label}",
@@ -1248,27 +1759,35 @@ def run_viewer() -> None:
     pygame.init()
     pygame.display.set_caption("AgeGrid Viewer")
 
+    _set_hex_zoom(1.0)
     env = AgeGridEnv()
-
-    tile = 48
-    pad = 16
+    pad = 20
     top_bar = 348
-    side_panel = 292
-    board_width = env.config.width * tile
-
-    width_px = pad * 3 + board_width + side_panel
-    height_px = pad * 2 + top_bar + env.config.height * tile
+    side_panel = 320
+    default_board_width, default_board_height = _board_pixel_size(env)
+    width_px = pad * 3 + default_board_width + side_panel + 36
+    height_px = pad * 2 + top_bar + default_board_height + BASE_HEX_SIZE + 44
 
     screen = pygame.display.set_mode((width_px, height_px))
     clock = pygame.time.Clock()
+    board_assets = BoardAssets.load(Path.cwd())
 
     font = pygame.font.SysFont("segoeui", 24, bold=True)
     big = pygame.font.SysFont("segoeui", 34, bold=True)
     small = pygame.font.SysFont("segoeui", 18)
     tiny = pygame.font.SysFont("segoeui", 16)
 
+    board_x = pad
+    board_content_top = pad + top_bar + 8
+    board_content_bottom = height_px - pad - 18
+    board_rect = pygame.Rect(
+        board_x,
+        board_content_top,
+        default_board_width,
+        max(default_board_height, board_content_bottom - board_content_top),
+    )
     btn_w, btn_h = 156, 42
-    btn_rect = pygame.Rect(pad + board_width - btn_w - 18, pad + 26, btn_w, btn_h)
+    btn_rect = pygame.Rect(pad + default_board_width - btn_w - 18, pad + 26, btn_w, btn_h)
 
     red_index = 0
     blue_index = 0
@@ -1285,6 +1804,18 @@ def run_viewer() -> None:
     event_scroll = 0
     event_panel_rect = pygame.Rect(0, 0, 0, 0)
     tech_btn_rect = pygame.Rect(0, 0, 0, 0)
+    camera_btn_rect = pygame.Rect(0, 0, 0, 0)
+    selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
+    selected_tile: tuple[int, int] | None = None
+    selected_unit_id: int | None = None
+    camera_zoom = 1.0
+    camera_pan = [0.0, 0.0]
+    panning = False
+    pan_anchor_mouse = (0, 0)
+    pan_anchor = (0.0, 0.0)
+    pan_drag_distance = 0.0
+    board_backdrop = board_rect.inflate(22, 28)
+    board_origin = _board_origin_in_viewport(board_rect, default_board_width, default_board_height)
 
     running = True
     while running:
@@ -1328,6 +1859,10 @@ def run_viewer() -> None:
                         blue_info = FactionTurnInfo("Blue", [])
                         turn_history = []
                         effects = []
+                        selected_tile = None
+                        selected_unit_id = None
+                        camera_zoom = _set_hex_zoom(1.0)
+                        camera_pan = [0.0, 0.0]
                         in_setup = False
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if red_card.collidepoint(event.pos):
@@ -1344,6 +1879,10 @@ def run_viewer() -> None:
                         blue_info = FactionTurnInfo("Blue", [])
                         turn_history = []
                         effects = []
+                        selected_tile = None
+                        selected_unit_id = None
+                        camera_zoom = _set_hex_zoom(1.0)
+                        camera_pan = [0.0, 0.0]
                         in_setup = False
             continue
 
@@ -1357,6 +1896,10 @@ def run_viewer() -> None:
                 elif event.key == pygame.K_r:
                     in_setup = True
                     show_tech_tree = False
+                    selected_tile = None
+                    selected_unit_id = None
+                    camera_zoom = _set_hex_zoom(1.0)
+                    camera_pan = [0.0, 0.0]
                 elif event.key == pygame.K_t:
                     show_tech_tree = not show_tech_tree
                 elif event.key == pygame.K_d:
@@ -1381,9 +1924,27 @@ def run_viewer() -> None:
                         effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                         event_scroll = 0
 
-            if event.type == pygame.MOUSEWHEEL and event_panel_rect.width > 0:
-                if event_panel_rect.collidepoint(pygame.mouse.get_pos()):
+            if event.type == pygame.MOUSEWHEEL:
+                mouse_pos = pygame.mouse.get_pos()
+                if event_panel_rect.width > 0 and event_panel_rect.collidepoint(mouse_pos):
                     event_scroll = max(0, event_scroll - event.y)
+                elif board_backdrop.collidepoint(mouse_pos):
+                    old_zoom = camera_zoom
+                    old_board_width, old_board_height = _board_pixel_size(env)
+                    old_origin = _board_origin_in_viewport(board_rect, old_board_width, old_board_height, tuple(camera_pan))
+                    zoom_delta = ZOOM_STEP if event.y > 0 else -ZOOM_STEP
+                    camera_zoom = _set_hex_zoom(camera_zoom + zoom_delta)
+                    new_board_width, new_board_height = _board_pixel_size(env)
+                    centered_origin = _board_origin_in_viewport(board_rect, new_board_width, new_board_height)
+                    scale = camera_zoom / old_zoom if old_zoom else 1.0
+                    camera_pan[0] = mouse_pos[0] - scale * (mouse_pos[0] - old_origin[0]) - centered_origin[0]
+                    camera_pan[1] = mouse_pos[1] - scale * (mouse_pos[1] - old_origin[1]) - centered_origin[1]
+                    camera_pan[0], camera_pan[1] = _clamp_camera_pan(
+                        board_rect,
+                        new_board_width,
+                        new_board_height,
+                        tuple(camera_pan),
+                    )
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if btn_rect.collidepoint(event.pos) and env.winner() is None:
@@ -1392,16 +1953,58 @@ def run_viewer() -> None:
                     effects.extend(_effects_from_actions(env, red_actions, "Red"))
                     effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                     event_scroll = 0
+                elif selected_unit_close_rect.collidepoint(event.pos):
+                    selected_unit_id = None
+                    selected_tile = None
                 elif tech_btn_rect.collidepoint(event.pos):
                     show_tech_tree = not show_tech_tree
+                elif camera_btn_rect.collidepoint(event.pos):
+                    camera_zoom = _set_hex_zoom(1.0)
+                    camera_pan = [0.0, 0.0]
+                elif board_rect.inflate(18, 18).collidepoint(event.pos):
+                    selected_tile = hexgrid.nearest_hex(
+                        event.pos,
+                        env.config.width,
+                        env.config.height,
+                        HEX_SIZE,
+                        board_origin,
+                    )
+                    if selected_tile is not None:
+                        selected_unit = next((u for u in env.units if u.position == selected_tile), None)
+                        selected_unit_id = selected_unit.id if selected_unit is not None else None
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
+                if board_backdrop.collidepoint(event.pos):
+                    panning = True
+                    pan_anchor_mouse = event.pos
+                    pan_anchor = (camera_pan[0], camera_pan[1])
+                    pan_drag_distance = 0.0
+            elif event.type == pygame.MOUSEMOTION and panning:
+                dx = event.pos[0] - pan_anchor_mouse[0]
+                dy = event.pos[1] - pan_anchor_mouse[1]
+                board_width, board_height = _board_pixel_size(env)
+                camera_pan[0], camera_pan[1] = _clamp_camera_pan(
+                    board_rect,
+                    board_width,
+                    board_height,
+                    (pan_anchor[0] + dx, pan_anchor[1] + dy),
+                )
+                pan_drag_distance = max(pan_drag_distance, math.hypot(dx, dy))
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 2 and panning:
+                panning = False
+                if pan_drag_distance < 8:
+                    camera_zoom = _set_hex_zoom(1.0)
+                    camera_pan = [0.0, 0.0]
 
         effects = _update_effects(effects)
+        board_width, board_height = _board_pixel_size(env)
+        camera_pan[0], camera_pan[1] = _clamp_camera_pan(board_rect, board_width, board_height, tuple(camera_pan))
+        board_origin = _board_origin_in_viewport(board_rect, board_width, board_height, tuple(camera_pan))
+        board_backdrop = board_rect.inflate(22, 28)
         screen.fill((9, 13, 18))
         hud_rect = pygame.Rect(0, 0, width_px, top_bar)
         pygame.draw.rect(screen, HUD_BG, hud_rect)
         pygame.draw.line(screen, PANEL_SOFT, (0, top_bar - 1), (width_px, top_bar - 1), 2)
-        board_x = pad
-        sidebar_x = board_x + board_width + pad
+        sidebar_x = board_x + default_board_width + pad
         sidebar_rect = pygame.Rect(sidebar_x, pad, side_panel, height_px - pad * 2)
         _draw_panel(screen, sidebar_rect, fill=(16, 22, 29), border=PANEL_SOFT, radius=16)
 
@@ -1411,13 +2014,13 @@ def run_viewer() -> None:
         blue_military = sum(1 for u in env.units if u.faction == "Blue" and u.attack_damage > 0)
         winner = env.winner()
 
-        top_bar_rect = pygame.Rect(board_x, pad, board_width, 96)
+        top_bar_rect = pygame.Rect(board_x, pad, default_board_width, 96)
         _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner)
 
         red_mode = "Defense" if defense_mode_active(env, "Red") else "Push" if push_mode_active(env, "Red") else "Field"
         blue_mode = "Defense" if defense_mode_active(env, "Blue") else "Push" if push_mode_active(env, "Blue") else "Field"
-        red_panel = pygame.Rect(board_x, top_bar_rect.bottom + 12, board_width // 2 - 8, 196)
-        blue_panel = pygame.Rect(board_x + board_width // 2 + 8, top_bar_rect.bottom + 12, board_width // 2 - 8, 196)
+        red_panel = pygame.Rect(board_x, top_bar_rect.bottom + 12, default_board_width // 2 - 8, 196)
+        blue_panel = pygame.Rect(board_x + default_board_width // 2 + 8, top_bar_rect.bottom + 12, default_board_width // 2 - 8, 196)
         _draw_player_card(screen, font, small, tiny, red_panel, "Red", AGENT_SPECS[red_index].label, env.bank["Red"], red_workers, red_military, env.bases["Red"].hp, red_mode, unit_composition(env, "Red"), RED_PRIMARY)
         _draw_player_card(screen, font, small, tiny, blue_panel, "Blue", AGENT_SPECS[blue_index].label, env.bank["Blue"], blue_workers, blue_military, env.bases["Blue"].hp, blue_mode, unit_composition(env, "Blue"), BLUE_PRIMARY)
 
@@ -1440,29 +2043,70 @@ def run_viewer() -> None:
             winner_text = f"{winner} wins"
             _draw_shadow_text(screen, small, winner_text, btn_rect.x - small.size(winner_text)[0] - 18, btn_rect.y + 12, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
-        ox = board_x
-        oy = pad + top_bar
         mouse_pos = pygame.mouse.get_pos()
+        hover_pos = None
+        if board_rect.inflate(24, 24).collidepoint(mouse_pos):
+            hover_pos = hexgrid.nearest_hex(mouse_pos, env.config.width, env.config.height, HEX_SIZE, board_origin)
 
-        for y in range(env.config.height):
-            for x in range(env.config.width):
-                rect = pygame.Rect(ox + x * tile, oy + y * tile, tile, tile)
-                base_color = GRID_BG if (x + y) % 2 == 0 else GRID_ALT
-                pygame.draw.rect(screen, base_color, rect)
-                pygame.draw.rect(screen, GRID_LINE, rect, width=1)
-                if rect.collidepoint(mouse_pos):
-                    hover = pygame.Surface((tile, tile), pygame.SRCALPHA)
-                    hover.fill((*GRID_HOVER, 42))
-                    screen.blit(hover, rect.topleft)
-                    pygame.draw.rect(screen, GRID_HOVER, rect, width=2)
+        shadow_rect = board_backdrop.inflate(18, 22)
+        shadow_surface = pygame.Surface(shadow_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(shadow_surface, (*BOARD_SHADOW, 105), shadow_surface.get_rect(), border_radius=28)
+        screen.blit(shadow_surface, (shadow_rect.x + 6, shadow_rect.y + 10))
+        _draw_panel(screen, board_backdrop, fill=(13, 19, 26), border=PANEL_SOFT, radius=20)
+        inset = board_backdrop.inflate(-10, -10)
+        pygame.draw.rect(screen, (17, 24, 32), inset, border_radius=18)
+        zoom_label = f"{int(round(camera_zoom * 100))}%"
+        zoom_badge = pygame.Rect(board_backdrop.right - 158, board_backdrop.y + 12, 64, 28)
+        pygame.draw.rect(screen, PANEL_INSET, zoom_badge, border_radius=10)
+        pygame.draw.rect(screen, PANEL_SOFT, zoom_badge, width=1, border_radius=10)
+        _draw_shadow_text(
+            screen,
+            tiny,
+            zoom_label,
+            zoom_badge.centerx - tiny.size(zoom_label)[0] // 2,
+            zoom_badge.y + 6,
+            TEXT_PRIMARY,
+            shadow=(10, 12, 16),
+            shadow_offset=1,
+        )
+        camera_btn_rect = pygame.Rect(board_backdrop.right - 86, board_backdrop.y + 11, 74, 30)
+        _draw_small_button(screen, tiny, camera_btn_rect, "Reset")
 
-        if board_x <= mouse_pos[0] < board_x + board_width and oy <= mouse_pos[1] < oy + env.config.height * tile:
-            hover_pos = ((mouse_pos[0] - ox) // tile, (mouse_pos[1] - oy) // tile)
-            hover_lines = _hover_tile_lines(env, hover_pos)
-            if hover_lines:
-                tile_rect = pygame.Rect(ox + hover_pos[0] * tile, oy + hover_pos[1] * tile, tile, tile)
-                hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
-                _draw_hover_tile_panel(screen, small, tiny, hover_rect, hover_lines)
+        previous_clip = screen.get_clip()
+        screen.set_clip(inset)
+        for row in range(env.config.height):
+            for col in range(env.config.width):
+                pos = (col, row)
+                points = _hex_points(col, row, board_origin)
+                bounds = _hex_bounds(col, row, board_origin)
+                terrain_kind = _terrain_kind(env, pos)
+                terrain_sprite = board_assets.terrain_tile(terrain_kind, col * 17 + row * 23)
+                scaled_tile = _safe_scale(terrain_sprite, (HEX_WIDTH, HEX_HEIGHT))
+                if scaled_tile is not None:
+                    screen.blit(scaled_tile, bounds.topleft)
+                else:
+                    fill = GRID_BG if (col + row) % 2 == 0 else GRID_ALT
+                    pygame.draw.polygon(screen, fill, points)
+                pygame.draw.polygon(screen, GRID_LINE, points, width=1)
+
+                if selected_tile == pos:
+                    highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
+                    pygame.draw.polygon(
+                        highlight,
+                        (*HEX_SELECT_FILL, 72),
+                        [(x - bounds.x, y - bounds.y) for x, y in points],
+                    )
+                    screen.blit(highlight, bounds.topleft)
+                    pygame.draw.polygon(screen, HEX_SELECT_LINE, points, width=4)
+                elif hover_pos == pos:
+                    highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
+                    pygame.draw.polygon(
+                        highlight,
+                        (*HEX_HOVER_FILL, 56),
+                        [(x - bounds.x, y - bounds.y) for x, y in points],
+                    )
+                    screen.blit(highlight, bounds.topleft)
+                    pygame.draw.polygon(screen, GRID_HOVER, points, width=3)
 
         visible_special_resources = {
             resource.id
@@ -1473,44 +2117,164 @@ def run_viewer() -> None:
         for r in env.resources:
             if r.id not in visible_special_resources:
                 continue
-            x, y = r.position
-            cx = ox + x * tile + tile // 2
-            cy = oy + y * tile + tile // 2
-            _draw_resource_icon(screen, r, (cx, cy), tiny)
+            center = _hex_center(r.position[0], r.position[1], board_origin)
+            _draw_soft_shadow(screen, (center[0], center[1] + 14), 34, 14, alpha=60)
+            sprite_key = "horses" if r.resource_type == "horses" else "stone" if r.resource_type == "stone" else "resource"
+            _draw_asset_marker(
+                screen,
+                board_assets.object_sprite(sprite_key),
+                center,
+                lambda resource=r, resource_center=center: _draw_resource_icon(screen, resource, resource_center, tiny),
+                scale=(36, 36),
+                offset_y=10,
+            )
 
         for faction, base in env.bases.items():
-            x, y = base.position
-            rect = pygame.Rect(ox + x * tile, oy + y * tile, tile, tile)
             color = RED_PRIMARY if faction == "Red" else BLUE_PRIMARY
-            pygame.draw.rect(screen, color, rect)
-            pygame.draw.rect(screen, (242, 232, 220), rect, width=2)
-            inner = rect.inflate(-14, -14)
-            pygame.draw.rect(screen, (243, 229, 195), inner)
-            _draw_shadow_text(screen, small, str(base.hp), rect.x + 14, rect.y + 14, (245, 245, 245), shadow=(44, 44, 44), shadow_offset=1)
+            center = _hex_center(base.position[0], base.position[1], board_origin)
+            bounds = _hex_bounds(base.position[0], base.position[1], board_origin)
+            _draw_soft_shadow(screen, (center[0], center[1] + 20), 50, 18, alpha=78)
+            pygame.draw.circle(screen, (*color, 90), (center[0], center[1] + 2), 26, width=4)
+            _draw_asset_marker(
+                screen,
+                board_assets.object_sprite("base"),
+                center,
+                lambda base_center=center, faction_color=color: pygame.draw.circle(screen, faction_color, base_center, 20),
+                tint=color,
+                scale=(56, 56),
+                offset_y=12,
+            )
+            hp_chip = pygame.Rect(bounds.centerx - 18, bounds.bottom - 12, 36, 22)
+            pygame.draw.rect(screen, (16, 21, 28), hp_chip, border_radius=10)
+            pygame.draw.rect(screen, color, hp_chip, width=2, border_radius=10)
+            _draw_shadow_text(screen, tiny, str(base.hp), hp_chip.x + 10, hp_chip.y + 2, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
         for b in env.buildings:
-            x, y = b.position
-            rect = pygame.Rect(ox + x * tile + 8, oy + y * tile + 8, tile - 16, tile - 16)
             color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
-            pygame.draw.rect(screen, color, rect, border_radius=6)
-            pygame.draw.rect(screen, (242, 233, 220), rect, width=2, border_radius=6)
-            _draw_building_icon(screen, b, rect, RED_PRIMARY if b.faction == "Red" else BLUE_PRIMARY)
+            center = _hex_center(b.position[0], b.position[1], board_origin)
+            rect = pygame.Rect(center[0] - 18, center[1] - 22, 36, 36)
+            _draw_soft_shadow(screen, (center[0], center[1] + 18), 42, 16, alpha=70)
+            _draw_asset_marker(
+                screen,
+                board_assets.object_sprite(b.building_type),
+                center,
+                lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
+                tint=color,
+                scale=(44, 44),
+                offset_y=12,
+            )
 
         for u in env.units:
-            x, y = u.position
-            cx = ox + x * tile + tile // 2
-            cy = oy + y * tile + tile // 2
+            cx, cy = _hex_center(u.position[0], u.position[1], board_origin)
             color = (242, 206, 142) if u.faction == "Red" else (189, 225, 255)
             border = RED_PRIMARY if u.faction == "Red" else BLUE_PRIMARY
-            _draw_unit_icon(screen, u, (cx, cy), color, border)
+            _draw_soft_shadow(screen, (cx, cy + 18), 28, 12, alpha=64)
+            if selected_unit_id == u.id:
+                pygame.draw.circle(screen, (*HEX_SELECT_FILL, 90), (cx, cy + 2), 24, width=4)
+                pygame.draw.circle(screen, (*border, 105), (cx, cy + 2), 27, width=2)
+            if not _draw_unit_sprite(screen, board_assets, env, u, (cx, cy + 1), color, border, size=30):
+                _draw_unit_icon(screen, u, (cx, cy + 1), color, border)
 
-        _draw_effects(screen, effects, ox, oy, tile, small)
+        _draw_effects(screen, effects, board_origin[0], board_origin[1], HEX_WIDTH, small)
+        screen.set_clip(previous_clip)
+
+        if hover_pos is not None:
+            hover_lines = _hover_tile_lines(env, hover_pos)
+            if hover_lines:
+                tile_rect = _hex_bounds(hover_pos[0], hover_pos[1], board_origin)
+                hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
+                _draw_hover_tile_panel(screen, small, tiny, hover_rect, hover_lines)
+
+        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
+        if selected_unit is None:
+            selected_unit_id = None
+            selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
+        else:
+            inspect_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 18, 300, 268)
+            selected_unit_close_rect = _draw_selected_unit_panel(
+                screen,
+                small,
+                tiny,
+                tiny,
+                board_assets,
+                env,
+                selected_unit,
+                inspect_rect,
+            )
+        if selected_unit_id is None and selected_tile is not None:
+            inspect_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 18, 300, 252)
+            selected_building = next((b for b in env.buildings if b.position == selected_tile), None)
+            selected_resource = next((r for r in env.resources if r.position == selected_tile and r.remaining > 0), None)
+            selected_base_entry = next(((faction, base) for faction, base in env.bases.items() if base.position == selected_tile), None)
+            if selected_building is not None:
+                spec = production.building_stats(env, selected_building.faction, selected_building.building_type)
+                max_hp = spec.hp if spec is not None else selected_building.hp
+                selected_unit_close_rect = _draw_selected_object_panel(
+                    screen,
+                    small,
+                    tiny,
+                    tiny,
+                    board_assets,
+                    env,
+                    inspect_rect,
+                    title=_building_label(selected_building.building_type),
+                    subtitle=f"{selected_building.faction} Building",
+                    lines=_selected_building_lines(env, selected_building)[1:],
+                    hp_value=selected_building.hp,
+                    hp_max=max_hp,
+                    icon_kind=selected_building.building_type,
+                    accent=RED_PRIMARY if selected_building.faction == "Red" else BLUE_PRIMARY,
+                )
+            elif selected_base_entry is not None:
+                faction, selected_base = selected_base_entry
+                selected_unit_close_rect = _draw_selected_object_panel(
+                    screen,
+                    small,
+                    tiny,
+                    tiny,
+                    board_assets,
+                    env,
+                    inspect_rect,
+                    title=f"{faction} Base",
+                    subtitle="Capital stronghold",
+                    lines=_selected_base_lines(selected_base, faction)[1:],
+                    hp_value=selected_base.hp,
+                    hp_max=env.config.base_hp,
+                    icon_kind="base",
+                    accent=RED_PRIMARY if faction == "Red" else BLUE_PRIMARY,
+                )
+            elif selected_resource is not None:
+                resource_kind = "horses" if selected_resource.resource_type == "horses" else "stone" if selected_resource.resource_type == "stone" else "resource"
+                selected_unit_close_rect = _draw_selected_object_panel(
+                    screen,
+                    small,
+                    tiny,
+                    tiny,
+                    board_assets,
+                    env,
+                    inspect_rect,
+                    title=RESOURCE_LABELS.get(selected_resource.resource_type, selected_resource.resource_type.title()),
+                    subtitle="Map resource",
+                    lines=_selected_resource_lines(selected_resource)[1:],
+                    icon_kind=resource_kind,
+                    accent=(136, 170, 102),
+                )
+            else:
+                selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
 
         if show_debug:
             debug_rect = pygame.Rect(board_x, height_px - 44, 258, 30)
             pygame.draw.rect(screen, (16, 22, 30), debug_rect, border_radius=10)
             pygame.draw.rect(screen, PANEL_SOFT, debug_rect, width=1, border_radius=10)
-            _draw_text_block(screen, tiny, ["Debug: D   Snapshot: P   Tech tree: T   Reset: R"], debug_rect.x + 10, debug_rect.y + 7, TEXT_MUTED, 16)
+            _draw_text_block(
+                screen,
+                tiny,
+                ["Debug: D  Snapshot: P  Tech tree: T  Reset: R  Wheel zoom  MMB drag/reset"],
+                debug_rect.x + 10,
+                debug_rect.y + 7,
+                TEXT_MUTED,
+                16,
+            )
 
         if show_tech_tree:
             overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)

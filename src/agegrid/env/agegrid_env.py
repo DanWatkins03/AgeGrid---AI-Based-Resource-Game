@@ -6,8 +6,9 @@ import random
 
 from src.agegrid.env.actions import Action
 from src.agegrid.env.entities import Base, Building, ResourceNode, Unit
+from src.agegrid.env import hexgrid
 
-from src.agegrid.env.state import BankView, FactionState
+from src.agegrid.env.state import BankView, FactionState, RelationState
 from src.agegrid.env.systems import combat, economy, mapgen, movement, production, tech, victory
 
 Position = Tuple[int, int]
@@ -52,6 +53,10 @@ class GameConfig:
     # Eventually add more like money win, combat win etc.
     target_bank: int | None = None
     collapse_enabled: bool = True
+    min_war_duration: int = 6
+    peace_offer_min_turns: int = 4
+    truce_turns: int = 8
+    peace_indemnity_base: int = 24
 
 
 class AgeGridEnv:
@@ -75,6 +80,7 @@ class AgeGridEnv:
         self.units: List[Unit] = []
         self.faction_states: Dict[str, FactionState] = {}
         self.bank = BankView(self.faction_states)
+        self.relations: Dict[frozenset[str], RelationState] = {}
         self._next_unit_id: int = 1
         self._next_building_id: int = 1
         self.current_events: list[str] = []
@@ -102,6 +108,13 @@ class AgeGridEnv:
             for faction in self.factions
         }
         self.bank = BankView(self.faction_states)
+        self.relations = {
+            frozenset(self.factions): RelationState(
+                state="peace",
+                since_turn=0,
+                truce_until_turn=0,
+            )
+        }
 
         self.resources = mapgen.place_symmetric_resources(
             self,
@@ -186,6 +199,76 @@ class AgeGridEnv:
     def _mirror(self, pos: Position) -> Position:
         x, y = pos
         return (self.config.width - 1 - x, self.config.height - 1 - y)
+
+    def _relation_key(self, faction_a: str, faction_b: str) -> frozenset[str]:
+        return frozenset((faction_a, faction_b))
+
+    def relation_state(self, faction_a: str, faction_b: str) -> RelationState:
+        key = self._relation_key(faction_a, faction_b)
+        if key not in self.relations:
+            self.relations[key] = RelationState()
+        relation = self.relations[key]
+        if relation.state == "truce" and self.turn >= relation.truce_until_turn:
+            relation.state = "peace"
+            relation.since_turn = self.turn
+            relation.pending_peace_by = None
+            relation.pending_indemnity = 0
+        return relation
+
+    def at_war(self, faction_a: str, faction_b: str) -> bool:
+        return self.relation_state(faction_a, faction_b).state == "war"
+
+    def can_declare_war(self, faction: str, target_faction: str) -> bool:
+        relation = self.relation_state(faction, target_faction)
+        return relation.state != "war" and self.turn >= relation.truce_until_turn
+
+    def declare_war(self, faction: str, target_faction: str) -> bool:
+        if not self.can_declare_war(faction, target_faction):
+            return False
+        relation = self.relation_state(faction, target_faction)
+        relation.state = "war"
+        relation.since_turn = self.turn
+        relation.pending_peace_by = None
+        relation.pending_indemnity = 0
+        return True
+
+    def can_offer_peace(self, faction: str, target_faction: str) -> bool:
+        relation = self.relation_state(faction, target_faction)
+        return (
+            relation.state == "war"
+            and self.turn - relation.since_turn >= self.config.peace_offer_min_turns
+            and relation.pending_peace_by is None
+        )
+
+    def offer_peace(self, faction: str, target_faction: str, indemnity: int) -> bool:
+        if not self.can_offer_peace(faction, target_faction):
+            return False
+        relation = self.relation_state(faction, target_faction)
+        relation.pending_peace_by = faction
+        relation.pending_indemnity = max(0, indemnity)
+        return True
+
+    def can_accept_peace(self, faction: str, target_faction: str) -> bool:
+        relation = self.relation_state(faction, target_faction)
+        return relation.state == "war" and relation.pending_peace_by == target_faction
+
+    def accept_peace(self, faction: str, target_faction: str) -> int | None:
+        if not self.can_accept_peace(faction, target_faction):
+            return None
+        relation = self.relation_state(faction, target_faction)
+        payer = relation.pending_peace_by
+        if payer is None:
+            return None
+        receiver = target_faction if payer == faction else faction
+        indemnity = min(relation.pending_indemnity, self.bank[payer])
+        self.bank[payer] -= indemnity
+        self.bank[receiver] += indemnity
+        relation.state = "truce"
+        relation.since_turn = self.turn
+        relation.truce_until_turn = self.turn + self.config.truce_turns
+        relation.pending_peace_by = None
+        relation.pending_indemnity = 0
+        return indemnity
     
 
     def _occupied_positions(self) -> set[Position]:
@@ -203,12 +286,7 @@ class AgeGridEnv:
         return None
 
     def _delta(self, direction: str) -> Position:
-        return {
-            "up": (0, -1),
-            "down": (0, 1),
-            "left": (-1, 0),
-            "right": (1, 0),
-        }[direction]
+        return hexgrid.direction_map(0)[direction]
 
     # Game actions
     def move_unit(self, unit_id: int, direction: str) -> bool:
@@ -237,6 +315,7 @@ class AgeGridEnv:
     def legal_actions(self, faction: str | None = None) -> list[Action]:
         faction = faction or self._current_faction()
         action_set: set[Action] = set()
+        enemies = [name for name in self.factions if name != faction]
 
         units = [u for u in self.units if u.faction == faction]
         workers = [u for u in units if u.unit_type == "worker"]
@@ -244,19 +323,8 @@ class AgeGridEnv:
         enemy_units = [u for u in self.units if u.faction != faction]
         enemy_base_positions = [base.position for name, base in self.bases.items() if name != faction]
         enemy_base_approach_positions: list[Position] = []
-        for base_x, base_y in enemy_base_positions:
-            for pos in (
-                (base_x + 1, base_y),
-                (base_x - 1, base_y),
-                (base_x, base_y + 1),
-                (base_x, base_y - 1),
-                (base_x + 1, base_y + 1),
-                (base_x - 1, base_y + 1),
-                (base_x + 1, base_y - 1),
-                (base_x - 1, base_y - 1),
-            ):
-                if self._in_bounds(pos):
-                    enemy_base_approach_positions.append(pos)
+        for base_pos in enemy_base_positions:
+            enemy_base_approach_positions.extend(pos for pos in hexgrid.neighbors(base_pos) if self._in_bounds(pos))
         friendly_guard_positions = [self.bases[faction].position]
         friendly_guard_positions.extend(worker.position for worker in workers)
         friendly_guard_positions.extend(unit.position for unit in combat_units)
@@ -283,6 +351,15 @@ class AgeGridEnv:
                 if pos != worker.position and movement.can_move_towards(self, worker.id, pos):
                     action_set.add(("move_towards", worker.id, pos))
 
+        for enemy_faction in enemies:
+            if self.can_declare_war(faction, enemy_faction):
+                action_set.add(("declare_war", enemy_faction))
+            if self.can_offer_peace(faction, enemy_faction):
+                indemnity = min(self.config.peace_indemnity_base, self.bank[faction])
+                action_set.add(("offer_peace", enemy_faction, indemnity))
+            if self.can_accept_peace(faction, enemy_faction):
+                action_set.add(("accept_peace", enemy_faction))
+
         if production.can_train_unit(self, faction, "worker"):
             action_set.add(("spawn_worker",))
 
@@ -296,8 +373,7 @@ class AgeGridEnv:
 
         for worker in workers:
             for building_type in production.BUILDING_DEFS:
-                x, y = worker.position
-                for pos in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                for pos in hexgrid.neighbors(worker.position):
                     if production.can_build(self, faction, worker.id, building_type, pos):
                         action_set.add(("build", worker.id, building_type, pos))
 
@@ -318,16 +394,16 @@ class AgeGridEnv:
             for target in self.units:
                 if target.faction == faction:
                     continue
-                distance = abs(attacker.position[0] - target.position[0]) + abs(attacker.position[1] - target.position[1])
-                if distance <= attacker.attack_range and (
+                distance = hexgrid.distance(attacker.position, target.position)
+                if self.at_war(faction, target.faction) and distance <= attacker.attack_range and (
                     target.unit_type != "worker" or self.turn >= self.config.worker_peace_until_turn
                 ):
                     action_set.add(("attack", attacker.id, target.id))
             for target_faction, base in self.bases.items():
                 if target_faction == faction:
                     continue
-                distance = abs(attacker.position[0] - base.position[0]) + abs(attacker.position[1] - base.position[1])
-                if distance <= attacker.attack_range and self.turn >= self.config.base_peace_until_turn:
+                distance = hexgrid.distance(attacker.position, base.position)
+                if self.at_war(faction, target_faction) and distance <= attacker.attack_range and self.turn >= self.config.base_peace_until_turn:
                     action_set.add(("attack_base", attacker.id, target_faction))
 
         return sorted(action_set, key=str)
@@ -351,11 +427,7 @@ class AgeGridEnv:
 
     def heal_amount_for(self, unit: Unit) -> int:
         amount = self.config.unit_heal_per_turn
-        if (
-            abs(unit.position[0] - self.bases[unit.faction].position[0])
-            + abs(unit.position[1] - self.bases[unit.faction].position[1])
-            <= self.config.unit_heal_base_radius
-        ):
+        if hexgrid.distance(unit.position, self.bases[unit.faction].position) <= self.config.unit_heal_base_radius:
             amount += self.config.unit_heal_near_base_bonus
         return amount
 
@@ -450,6 +522,40 @@ class AgeGridEnv:
                 return True, "research"
             return False, "research_failed"
 
+        if kind == "declare_war":
+            if len(action) != 2:
+                return False, "bad_args"
+            target_faction = action[1]
+            ok = self.declare_war(faction, target_faction)
+            if ok:
+                self.actions_left -= 1
+                self._record_event(f"{faction} declared war on {target_faction}")
+                return True, "declare_war"
+            return False, "declare_war_failed"
+
+        if kind == "offer_peace":
+            if len(action) != 3:
+                return False, "bad_args"
+            target_faction = action[1]
+            indemnity = int(action[2])
+            ok = self.offer_peace(faction, target_faction, indemnity)
+            if ok:
+                self.actions_left -= 1
+                self._record_event(f"{faction} offered peace to {target_faction} for {indemnity}")
+                return True, "offer_peace"
+            return False, "offer_peace_failed"
+
+        if kind == "accept_peace":
+            if len(action) != 2:
+                return False, "bad_args"
+            target_faction = action[1]
+            indemnity = self.accept_peace(faction, target_faction)
+            if indemnity is not None:
+                self.actions_left -= 1
+                self._record_event(f"{faction} accepted peace with {target_faction} (indemnity {indemnity})")
+                return True, "accept_peace"
+            return False, "accept_peace_failed"
+
         if kind == "attack":
             if len(action) != 3:
                 return False, "bad_args"
@@ -493,10 +599,13 @@ class AgeGridEnv:
             if unit is None or unit.faction != faction:
                 return False, "not_your_unit"
 
+            start_pos = unit.position
             ok = self.move_towards(unit_id, target)
             if ok:
                 self.actions_left -= 1
-                self._record_event(f"{faction} unit#{unit_id} moved toward {target}")
+                self._record_event(
+                    f"{faction} unit#{unit_id} moved from {start_pos} to {unit.position} toward {target}"
+                )
                 return True, "move"
             return False, "move_blocked"
 
@@ -565,7 +674,7 @@ class AgeGridEnv:
             if unit.faction != faction or unit.hp <= 0 or unit.id in self.attacked_unit_ids:
                 continue
             if any(
-                other.faction == enemy and other.attack_damage > 0 and abs(other.position[0] - unit.position[0]) + abs(other.position[1] - unit.position[1]) <= 1
+                other.faction == enemy and other.attack_damage > 0 and hexgrid.distance(other.position, unit.position) <= 1
                 for other in self.units
             ):
                 continue
@@ -619,6 +728,7 @@ class AgeGridEnv:
             f"Turn: {self.turn}/{self.config.max_turns} | Year: {self.formatted_year()} | Era: {self.current_era()} | Current: {self.factions[self.current_player]}",
             f"Red base @ {self.bases['Red'].position} HP={self.bases['Red'].hp} | Bank={self.bank['Red']}",
             f"Blue base @ {self.bases['Blue'].position} HP={self.bases['Blue'].hp} | Bank={self.bank['Blue']}",
+            f"Relations: {self.relation_state('Red', 'Blue').state.title()}",
             f"Resources: {len(self.resources)} nodes",
             "Units: " + (unit_summary if unit_summary else "-"),
             "Techs: " + tech_summary,

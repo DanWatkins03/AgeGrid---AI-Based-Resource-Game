@@ -15,6 +15,15 @@ class FactionState:
     building_ids: list[int] = field(default_factory=list)
 
 
+@dataclass
+class RelationState:
+    state: str = "peace"  # peace, war, truce
+    since_turn: int = 0
+    truce_until_turn: int = 0
+    pending_peace_by: str | None = None
+    pending_indemnity: int = 0
+
+
 class BankView(MutableMapping[str, int]):
     """Backwards-compatible dict-like access to faction resources."""
 
@@ -35,4 +44,3 @@ class BankView(MutableMapping[str, int]):
 
     def __len__(self) -> int:
         return len(self._faction_states)
-

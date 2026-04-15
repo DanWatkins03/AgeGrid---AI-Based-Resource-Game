@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from src.agegrid.env import hexgrid
+
 
 def _distance(a: tuple[int, int], b: tuple[int, int]) -> int:
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    return hexgrid.distance(a, b)
 
 
 def _structure_target_priority(structure_pos: tuple[int, int], unit) -> tuple[int, int, int]:
@@ -30,12 +32,14 @@ def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
         return False
     if attacker.faction != faction or target.faction == faction:
         return False
+    if not env.at_war(faction, target.faction):
+        return False
     if attacker.attack_damage <= 0 or attacker.attack_range <= 0:
         return False
     if target.unit_type == "worker" and env.turn < env.config.worker_peace_until_turn:
         return False
 
-    distance = abs(attacker.position[0] - target.position[0]) + abs(attacker.position[1] - target.position[1])
+    distance = _distance(attacker.position, target.position)
     if distance > attacker.attack_range:
         return False
 
@@ -54,6 +58,8 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
         return False
     if attacker.faction != faction or target_faction == faction:
         return False
+    if not env.at_war(faction, target_faction):
+        return False
     if target_base.hp <= 0:
         return False
     if attacker.attack_damage <= 0 or attacker.attack_range <= 0:
@@ -61,7 +67,7 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
     if env.turn < env.config.base_peace_until_turn:
         return False
 
-    distance = abs(attacker.position[0] - target_base.position[0]) + abs(attacker.position[1] - target_base.position[1])
+    distance = _distance(attacker.position, target_base.position)
     if distance > attacker.attack_range:
         return False
 
