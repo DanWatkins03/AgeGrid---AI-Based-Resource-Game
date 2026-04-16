@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Tuple
 
-from src.agegrid.env.systems import production
+from src.agegrid.env.systems import production, tech
 
 Position = Tuple[int, int]
 
@@ -16,7 +16,7 @@ def gather(env, worker_id: int) -> bool:
     if node is None:
         return False
 
-    amount = env.config.worker_gather_amount
+    amount = env.config.worker_gather_amount + tech.passive_modifier_total(env, unit.faction, "worker_gather_bonus")
     env.faction_state(unit.faction).resources += amount
     return True
 

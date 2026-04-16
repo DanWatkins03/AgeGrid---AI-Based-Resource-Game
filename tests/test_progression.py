@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from src.agegrid.agents.greedy import GreedyAgent
-from src.agegrid.agents.heuristic import HEURISTIC_PROFILES, HeuristicAgent, army_plan
+from src.agegrid.agents.heuristic import HEURISTIC_PROFILES, HeuristicAgent, army_plan, heuristic_diagnostics
 from src.agegrid.agents.registry import create_agent
 from src.agegrid.env.agegrid_env import AgeGridEnv, GameConfig
 from src.agegrid.env.entities import ResourceNode
@@ -34,12 +34,12 @@ class TechSystemTests(unittest.TestCase):
         env = make_env()
 
         self.assertTrue(tech.can_research(env, "Red", "mining"))
-        self.assertFalse(tech.can_research(env, "Red", "bronze_working"))
+        self.assertFalse(tech.can_research(env, "Red", "bronze"))
 
         self.assertTrue(tech.research(env, "Red", "mining"))
         self.assertEqual(env.faction_state("Red").tech_in_progress, "mining")
         self.assertEqual(env.bank["Red"], 215)
-        self.assertFalse(tech.can_research(env, "Red", "bronze_working"))
+        self.assertFalse(tech.can_research(env, "Red", "bronze"))
 
     def test_research_completes_after_required_turns(self) -> None:
         env = make_env()
@@ -68,16 +68,16 @@ class TechSystemTests(unittest.TestCase):
         env.faction_state("Red").techs_unlocked.add("mining")
         self.assertEqual(env.current_era(), "Stone Age")
 
-        env.faction_state("Blue").techs_unlocked.add("bronze_working")
+        env.faction_state("Blue").techs_unlocked.add("bronze")
         self.assertEqual(env.current_era(), "Bronze Age")
 
-        env.faction_state("Red").techs_unlocked.add("iron_working")
+        env.faction_state("Red").techs_unlocked.add("iron")
         self.assertEqual(env.current_era(), "Iron Age")
 
         env.faction_state("Blue").techs_unlocked.add("engineering")
         self.assertEqual(env.current_era(), "Engineering Age")
         self.assertIsNone(env.faction_state("Red").tech_in_progress)
-        self.assertTrue(tech.can_research(env, "Red", "bronze_working"))
+        self.assertTrue(tech.can_research(env, "Red", "bronze"))
 
     def test_research_is_free_once_per_turn_and_preserves_action_points(self) -> None:
         env = make_env()
@@ -87,7 +87,52 @@ class TechSystemTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "research")
         self.assertEqual(env.actions_left, env.config.actions_per_turn)
-        self.assertFalse(env.apply_action(("research", "bronze_working"))[0])
+        self.assertFalse(env.apply_action(("research", "bronze"))[0])
+
+    def test_stronghold_requires_both_fortify_and_construction(self) -> None:
+        env = make_env()
+        state = env.faction_state("Red")
+        state.techs_unlocked.update({"mining", "bronze", "masonry", "iron"})
+
+        self.assertFalse(tech.can_research(env, "Red", "stronghold"))
+
+        state.techs_unlocked.add("fortify")
+        self.assertFalse(tech.can_research(env, "Red", "stronghold"))
+
+        state.techs_unlocked.add("construction")
+        self.assertTrue(tech.can_research(env, "Red", "stronghold"))
+
+    def test_advanced_siege_unlocks_ballista_after_dual_prerequisites(self) -> None:
+        env = make_env()
+        state = env.faction_state("Red")
+        state.techs_unlocked.update({"mining", "bronze", "fletching", "engineering"})
+
+        self.assertFalse(tech.can_research(env, "Red", "advanced_siege"))
+
+        state.techs_unlocked.add("iron")
+        state.techs_unlocked.add("steel")
+        self.assertTrue(tech.can_research(env, "Red", "advanced_siege"))
+        self.assertTrue(tech.research(env, "Red", "advanced_siege"))
+        while tech.progress_research(env, "Red") is None:
+            pass
+
+        self.assertIn("advanced_siege", state.techs_unlocked)
+        self.assertIn("ballista", tech.unlocked_units(env, "Red"))
+
+    def test_war_economy_applies_military_discount_and_income_bonus(self) -> None:
+        env = make_env()
+        state = env.faction_state("Red")
+        state.techs_unlocked.update({"mining", "bronze", "masonry", "trade", "iron", "war_economy"})
+
+        self.assertEqual(production.unit_cost(env, "Red", "soldier"), 25)
+        self.assertEqual(tech.passive_modifier_total(env, "Red", "economy_income_bonus"), 1)
+
+    def test_infrastructure_no_longer_adds_passive_income_bonus(self) -> None:
+        env = make_env()
+        env.faction_state("Red").techs_unlocked.update({"mining", "masonry", "construction", "infrastructure"})
+
+        self.assertEqual(tech.passive_modifier_total(env, "Red", "building_cost_discount_pct"), 10)
+        self.assertEqual(tech.passive_modifier_total(env, "Red", "economy_income_bonus"), 0)
 
 
 class ProductionSystemTests(unittest.TestCase):
@@ -143,7 +188,7 @@ class ProductionSystemTests(unittest.TestCase):
 
     def test_training_soldier_requires_barracks(self) -> None:
         env = make_env()
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
 
         self.assertFalse(production.can_train_unit(env, "Red", "soldier"))
 
@@ -195,12 +240,14 @@ class ProductionSystemTests(unittest.TestCase):
         env.faction_state("Red").techs_unlocked.update(
             {
                 "mining",
-                "bronze_working",
+                "bronze",
                 "masonry",
-                "horsemanship",
+                "animal_husbandry",
+                "horseback_riding",
                 "fletching",
-                "iron_working",
-                "fortification",
+                "iron",
+                "construction",
+                "fortify",
                 "stirrups",
                 "engineering",
             }
@@ -212,7 +259,7 @@ class ProductionSystemTests(unittest.TestCase):
 
     def test_horseman_requires_stable_and_has_extended_move(self) -> None:
         env = make_env(num_resource_nodes=0, horse_resource_nodes=2, horse_resource_amount=20)
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "animal_husbandry", "horseback_riding"})
         worker, _, build_pos = self._horse_build_setup(env)
         self.assertTrue(production.build(env, "Red", worker.id, "stable", build_pos))
 
@@ -226,9 +273,9 @@ class ProductionSystemTests(unittest.TestCase):
             2,
         )
 
-    def test_iron_working_upgrades_new_soldiers(self) -> None:
+    def test_iron_upgrades_new_soldiers(self) -> None:
         env = make_env()
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "iron_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "iron"})
         worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
         self.assertTrue(production.build(env, "Red", worker.id, "barracks", (3, 1)))
         self.assertTrue(production.train_unit(env, "Red", "soldier"))
@@ -239,7 +286,7 @@ class ProductionSystemTests(unittest.TestCase):
 
     def test_engineering_unlocks_ballista_tower(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
-        env.faction_state("Red").techs_unlocked.update({"mining", "masonry", "engineering"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "masonry", "construction", "engineering"})
         worker, _, quarry_pos = self._stone_build_setup(env)
         self.assertTrue(production.build(env, "Red", worker.id, "quarry", quarry_pos))
         tower_worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
@@ -270,13 +317,24 @@ class ProductionSystemTests(unittest.TestCase):
 
         self.assertTrue(production.can_build(env, "Red", ballista_worker.id, "ballista_tower", ballista_pos))
 
+    def test_market_income_uses_tuned_base_value(self) -> None:
+        env = make_env()
+        env.faction_state("Red").techs_unlocked.update({"mining", "masonry", "trade", "markets"})
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        self.assertTrue(production.build(env, "Red", worker.id, "storehouse", (3, 1)))
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        self.assertTrue(production.build(env, "Red", worker.id, "market", (3, 2)))
+
+        market = next(b for b in env.buildings if b.faction == "Red" and b.building_type == "market")
+        self.assertEqual(production.building_stats(env, "Red", market.building_type).resource_income, 4)
+
 
 class HeuristicAgentTests(unittest.TestCase):
     def test_agent_declares_war_when_push_ready(self) -> None:
         env = make_env(target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -300,25 +358,78 @@ class HeuristicAgentTests(unittest.TestCase):
         self.assertEqual(build_action[2], "storehouse")
 
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(3, 1))
-        self.assertEqual(agent.act(env), ("research", "bronze_working"))
+        self.assertEqual(agent.act(env), ("research", "bronze"))
 
-    def test_agent_pursues_horsemanship_when_horses_are_available(self) -> None:
+    def test_agent_pursues_animal_husbandry_when_horses_are_available(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=0, horse_resource_nodes=2, horse_resource_amount=20)
         agent = HeuristicAgent(desired_workers=1)
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
 
-        self.assertEqual(agent.act(env), ("research", "horsemanship"))
+        self.assertEqual(agent.act(env), ("research", "animal_husbandry"))
 
     def test_agent_pursues_masonry_when_stone_is_available(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
         agent = HeuristicAgent(desired_workers=1)
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
 
         self.assertEqual(agent.act(env), ("research", "masonry"))
+
+    def test_heuristic_diagnostics_flags_recovery_when_far_behind(self) -> None:
+        env = make_env()
+        env.bank["Red"] = 20
+        env.bank["Blue"] = 220
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "construction", "trade", "markets", "currency", "engineering"}
+        )
+        env._spawn_building(faction="Blue", building_type="storehouse", hp=18, pos=(10, 10))
+        env._spawn_building(faction="Blue", building_type="market", hp=20, pos=(10, 11))
+        env._spawn_unit("Blue", "soldier", 10, (9, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 10, (9, 10), attack_damage=3, attack_range=1, move_steps=1)
+
+        diagnostics = heuristic_diagnostics(env, "Red")
+        self.assertTrue(diagnostics.behind)
+        self.assertTrue(diagnostics.recovery)
+        self.assertGreaterEqual(diagnostics.tech_deficit, 4)
+        self.assertGreaterEqual(diagnostics.economy_gap, 5)
+
+    def test_agent_prioritizes_construction_research_when_behind(self) -> None:
+        env = make_env()
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "masonry", "trade", "fletching"})
+        env.faction_state("Blue").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "construction", "engineering", "iron", "fortify", "walls"}
+        )
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+
+        self.assertEqual(agent.act(env), ("research", "construction"))
+
+    def test_agent_builds_archer_tower_before_siege_workshop_when_behind(self) -> None:
+        env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.bank["Red"] = 200
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "masonry", "construction", "engineering"})
+        env.faction_state("Red").tech_in_progress = "engineering"
+        env.faction_state("Blue").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "construction", "engineering", "fortify", "walls", "currency"}
+        )
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_building(faction="Red", building_type="quarry", hp=20, pos=(3, 1))
+        env._spawn_unit("Blue", "soldier", 10, (10, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 10, (10, 9), attack_damage=3, attack_range=1, move_steps=1)
+
+        action = agent.act(env)
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "build")
+        self.assertEqual(action[2], "archer_tower")
 
     def test_agent_builds_storehouse_before_endless_gathering(self) -> None:
         env = make_env(num_resource_nodes=2, resource_per_node=60)
@@ -357,7 +468,7 @@ class HeuristicAgentTests(unittest.TestCase):
     def test_agent_clears_spawn_ring_before_gathering_again(self) -> None:
         env = make_env(num_resource_nodes=0)
         agent = HeuristicAgent(desired_workers=1)
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env.bank["Red"] = 0
         env.resources = [ResourceNode(id=1, position=(0, 0), remaining=60)]
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(3, 3))
@@ -381,7 +492,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -393,7 +504,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -413,12 +524,13 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_state("Red").techs_unlocked.update(
             {
                 "mining",
-                "bronze_working",
+                "bronze",
                 "masonry",
-                "horsemanship",
+                "animal_husbandry",
+                "horseback_riding",
                 "fletching",
-                "iron_working",
-                "fortification",
+                "iron",
+                "fortify",
                 "stirrups",
                 "engineering",
             }
@@ -444,7 +556,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -468,7 +580,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -487,7 +599,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -504,7 +616,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 100
@@ -520,7 +632,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -534,11 +646,30 @@ class HeuristicAgentTests(unittest.TestCase):
         action = agent.act(env)
         self.assertEqual(action, ("attack", red_soldier.id, blue_camper.id))
 
+    def test_base_siege_priority_targets_enemy_already_in_base_attack_range(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=3)
+        env.resources = []
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env.bank["Red"] = 100
+        env._spawn_unit("Red", "soldier", 10, (2, 2), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 10, (1, 2), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 10, (4, 4), attack_damage=3, attack_range=1, move_steps=1)
+        env.declare_war("Red", "Blue")
+
+        red_soldier = next(u for u in env.units if u.faction == "Red" and u.unit_type == "soldier")
+        base_sieger = next(u for u in env.units if u.faction == "Blue" and u.position == (1, 2))
+
+        action = agent.act(env)
+        self.assertEqual(action, ("attack", red_soldier.id, base_sieger.id))
+
     def test_defense_mode_blocks_worker_spawn_during_emergency(self) -> None:
         env = make_env()
         agent = HeuristicAgent(desired_workers=5)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 100
@@ -552,7 +683,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env.bank["Red"] = 20
         env.units = [u for u in env.units if u.faction != "Red" or u.unit_type != "worker"]
         env.faction_state("Red").unit_ids = {u.id for u in env.units if u.faction == "Red"}
@@ -565,7 +696,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 100
@@ -593,7 +724,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 100
@@ -608,7 +739,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -627,7 +758,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -642,7 +773,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env.bank["Red"] = 0
         worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
         worker.position = (6, 6)
@@ -661,7 +792,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=3)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 100
@@ -674,7 +805,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching", "masonry", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching", "masonry", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -692,7 +823,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -709,7 +840,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -729,7 +860,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -746,7 +877,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env()
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "fletching"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "fletching"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -761,8 +892,8 @@ class HeuristicAgentTests(unittest.TestCase):
         env = make_env(target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
-        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze_working", "masonry"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "masonry"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -779,9 +910,9 @@ class HeuristicAgentTests(unittest.TestCase):
         env.bank["Red"] = 100
         env.bank["Blue"] = 100
         env.faction_state("Red").techs_unlocked.update(
-            {"mining", "bronze_working", "masonry", "horsemanship", "fletching"}
+            {"mining", "bronze", "masonry", "animal_husbandry", "horseback_riding", "fletching"}
         )
-        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze_working", "fletching", "iron_working"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "fletching", "iron"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -802,7 +933,7 @@ class HeuristicAgentTests(unittest.TestCase):
         agent = HeuristicAgent(desired_workers=1)
         env.turn = env.config.base_peace_until_turn
         env.resources = []
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env.bank["Red"] = 0
@@ -814,6 +945,43 @@ class HeuristicAgentTests(unittest.TestCase):
         action = agent.act(env)
         self.assertEqual(action, ("attack_base", red_soldier.id, "Blue"))
 
+    def test_agent_does_not_offer_peace_when_enemy_has_lethal_base_attack(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.turn = 20
+        env.resources = []
+        env.bank["Red"] = 22
+        env.bank["Blue"] = 0
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "soldier", 10, (2, 2), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 12, (2, 1), attack_damage=3, attack_range=1, move_steps=1)
+        env.bases["Red"].hp = 8
+        env.declare_war("Red", "Blue")
+        env.relation_state("Red", "Blue").since_turn = 0
+
+        action = agent.act(env)
+        self.assertIsNotNone(action)
+        self.assertNotEqual(action[0], "offer_peace")
+
+    def test_agent_prefers_non_idle_action_under_pressure_when_available(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.turn = 20
+        env.resources = []
+        env.bank["Red"] = 0
+        env.bank["Blue"] = 0
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "soldier", 10, (3, 2), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 10, (2, 1), attack_damage=3, attack_range=1, move_steps=1)
+        env.declare_war("Red", "Blue")
+
+        action = agent.act(env)
+        self.assertIsNotNone(action)
+
     def test_agent_rallies_line_units_before_base_push(self) -> None:
         env = make_env(target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
@@ -824,7 +992,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (9, 10), attack_damage=3, attack_range=1, move_steps=1)
@@ -851,8 +1019,8 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
-        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze_working", "fletching"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "fletching"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -881,8 +1049,8 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
-        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze_working", "fletching"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "fletching"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -911,7 +1079,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (3, 1), attack_damage=3, attack_range=1, move_steps=1)
@@ -938,7 +1106,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (3, 4), attack_damage=3, attack_range=1, move_steps=1)
@@ -963,7 +1131,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (3, 2), attack_damage=3, attack_range=1, move_steps=1)
@@ -986,7 +1154,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (2, 2), attack_damage=3, attack_range=1, move_steps=1)
@@ -1007,7 +1175,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.faction_states["Red"].unit_ids.clear()
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (4, 4), attack_damage=3, attack_range=1, move_steps=1)
@@ -1028,7 +1196,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.units = [u for u in env.units if u.faction == "Red" and u.unit_type == "worker"]
         env.faction_states["Blue"].unit_ids.clear()
         env._next_unit_id = max((u.id for u in env.units), default=0) + 1
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working", "horsemanship"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze", "animal_husbandry", "horseback_riding"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
@@ -1068,7 +1236,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.resources = []
         env.units = [u for u in env.units if u.faction != "Blue"]
         env.faction_states["Blue"].unit_ids.clear()
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (8, 8), attack_damage=3, attack_range=1, move_steps=1)
@@ -1085,7 +1253,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env.resources = []
         env.units = [u for u in env.units if u.faction != "Blue"]
         env.faction_states["Blue"].unit_ids.clear()
-        env.faction_state("Red").techs_unlocked.update({"mining", "bronze_working"})
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
         env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
         env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
         env._spawn_unit("Red", "soldier", 10, (8, 8), attack_damage=3, attack_range=1, move_steps=1)
@@ -1342,8 +1510,7 @@ class CombatAndVictoryTests(unittest.TestCase):
 
     def test_archer_tower_retaliation_can_finish_enemy(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
-        env.faction_state("Red").techs_unlocked.add("masonry")
-        env.faction_state("Red").techs_unlocked.add("mining")
+        env.faction_state("Red").techs_unlocked.update({"mining", "masonry", "construction"})
         stone_worker, _, quarry_pos = ProductionSystemTests()._stone_build_setup(env)
         self.assertTrue(production.build(env, "Red", stone_worker.id, "quarry", quarry_pos))
         tower_worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")

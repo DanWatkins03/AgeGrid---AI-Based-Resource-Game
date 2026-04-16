@@ -94,7 +94,7 @@ def place_symmetric_resources(env, n: int, remaining: int) -> List[ResourceNode]
             next_rid,
             used,
             "horses",
-            required_tech="horsemanship",
+            required_tech="animal_husbandry",
         )
         resources.extend(horse_resources)
 

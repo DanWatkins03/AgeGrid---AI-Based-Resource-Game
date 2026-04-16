@@ -728,6 +728,9 @@ class AgeGridEnv:
         """Reset counters for the currently active faction."""
         self._reset_turn_state()
 
+    def base_max_hp(self, faction: str) -> int:
+        return self.config.base_hp + tech.passive_modifier_total(self, faction, "base_hp_bonus")
+
     def unit_max_hp(self, unit: Unit) -> int:
         return production.unit_stats(self, unit.faction, unit.unit_type).hp
 
@@ -770,7 +773,7 @@ class AgeGridEnv:
 
     def _passive_income_for(self, faction: str) -> int:
         return sum(
-            production.BUILDING_DEFS[building.building_type].resource_income
+            production.building_stats(self, faction, building.building_type).resource_income
             for building in self.get_buildings_for_faction(faction)
             if building.hp > 0 and building.building_type in production.BUILDING_DEFS
         )
@@ -833,11 +836,11 @@ class AgeGridEnv:
 
     def current_era(self) -> str:
         unlocked = set().union(*(state.techs_unlocked for state in self.faction_states.values()))
-        if "engineering" in unlocked:
+        if unlocked.intersection({"engineering", "advanced_siege", "stronghold", "war_economy"}):
             return "Engineering Age"
-        if unlocked.intersection({"iron_working", "fortification", "stirrups", "fletching"}):
+        if unlocked.intersection({"iron", "steel", "fortify", "precision", "walls", "infrastructure", "markets", "currency", "stirrups", "logistics"}):
             return "Iron Age"
-        if unlocked.intersection({"bronze_working", "masonry", "horsemanship"}):
+        if unlocked.intersection({"bronze", "masonry", "animal_husbandry", "fletching", "construction", "trade", "horseback_riding", "agriculture"}):
             return "Bronze Age"
         if "mining" in unlocked:
             return "Stone Age"

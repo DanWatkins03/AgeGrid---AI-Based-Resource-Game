@@ -17,3 +17,7 @@ __pycache__/
 results/
 agegrid_debug_snapshot.txt
 
+# Claude Code
+CLAUDE.md
+.claude/
+

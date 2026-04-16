@@ -75,15 +75,27 @@ class BoardAssets:
             "quarry": _load_first([object_root / "mine.png", object_root / "rockGrey_large.png"]),
             "archer_tower": _load_first([object_root / "tower.png", object_root / "turret_small.png"]),
             "ballista_tower": _load_first([object_root / "turret_large.png", object_root / "tower.png"]),
+            "market": _load_first([object_root / "Market.png"]),
             "stone": _load_first([object_root / "rockGrey_large.png", object_root / "rockGrey_medium2.png"]),
             "horses": _load_first([object_root / "hay.png", object_root / "horseTrough.png"]),
             "resource": _load_first([object_root / "crystals1.png", object_root / "mine.png"]),
         }
         ui = {
+            # generic fallback panel / inset / button (keep existing callers working)
             "panel": _load_first([ui_root / "panel_brown.png", ui_root / "panel_beige.png"]),
             "panel_inset": _load_first([ui_root / "panelInset_beigeLight.png", ui_root / "panelInset_beige.png"]),
             "button": _load_first([ui_root / "buttonLong_brown.png", ui_root / "buttonLong_beige.png"]),
             "close": _load_first([ui_root / "iconCross_grey.png", ui_root / "iconCross_brown.png"]),
+            # faction-specific and themed panels
+            "panel_brown": _load_first([ui_root / "panel_brown.png"]),
+            "panel_beige": _load_first([ui_root / "panel_beige.png"]),
+            "panel_beigeLight": _load_first([ui_root / "panel_beigeLight.png"]),
+            "panel_blue": _load_first([ui_root / "panel_blue.png"]),
+            "panelInset_beige": _load_first([ui_root / "panelInset_beige.png"]),
+            "panelInset_beigeLight": _load_first([ui_root / "panelInset_beigeLight.png"]),
+            "panelInset_blue": _load_first([ui_root / "panelInset_blue.png"]),
+            "button_blue": _load_first([ui_root / "buttonLong_blue.png"]),
+            "button_grey": _load_first([ui_root / "buttonLong_grey.png"]),
             "bar_back_left": _load_first([ui_root / "barBack_horizontalLeft.png"]),
             "bar_back_mid": _load_first([ui_root / "barBack_horizontalMid.png"]),
             "bar_back_right": _load_first([ui_root / "barBack_horizontalRight.png"]),

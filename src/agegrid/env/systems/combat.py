@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.agegrid.env import hexgrid
+from src.agegrid.env.systems import tech
 
 
 def _distance(a: tuple[int, int], b: tuple[int, int]) -> int:
@@ -15,12 +16,8 @@ def _structure_target_priority(structure_pos: tuple[int, int], unit) -> tuple[in
 def _structure_attack_stats(env, building) -> tuple[int, int]:
     damage = building.attack_damage
     attack_range = building.attack_range
-    techs = env.faction_state(building.faction).techs_unlocked
-    if building.building_type == "archer_tower" and "fortification" in techs:
-        damage += 1
-    if building.building_type == "ballista_tower" and "fortification" in techs:
-        damage += 1
-        attack_range += 1
+    damage += tech.passive_modifier_total(env, building.faction, "tower_damage_bonus")
+    attack_range += tech.passive_modifier_total(env, building.faction, "tower_range_bonus")
     return damage, attack_range
 
 
@@ -76,15 +73,10 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
 
 
 def _base_attack_stats(env, faction: str) -> tuple[int, int]:
-    state = env.faction_state(faction)
     damage = env.config.base_attack_damage
     attack_range = env.config.base_attack_range
-    if "masonry" in state.techs_unlocked:
-        damage += env.config.masonry_base_attack_bonus
-    if "fortification" in state.techs_unlocked:
-        damage += 1
-    if "engineering" in state.techs_unlocked:
-        attack_range += 1
+    damage += tech.passive_modifier_total(env, faction, "base_attack_bonus")
+    attack_range += tech.passive_modifier_total(env, faction, "base_attack_range_bonus")
     return damage, attack_range
 
 
