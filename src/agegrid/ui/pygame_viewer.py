@@ -17,8 +17,7 @@ from src.agegrid.agents.heuristic import (
 from src.agegrid.agents.registry import AGENT_SPECS, create_agent
 from src.agegrid.env.agegrid_env import AgeGridEnv
 from src.agegrid.env import hexgrid
-from src.agegrid.env.systems import tech
-from src.agegrid.env.systems import production
+from src.agegrid.env.systems import movement, production, tech
 from src.agegrid.ui.assets import BoardAssets
 
 
@@ -68,6 +67,8 @@ RESOURCE_GLOW = (109, 192, 116)
 HEX_HOVER_FILL = (176, 206, 230)
 HEX_SELECT_FILL = (245, 216, 120)
 HEX_SELECT_LINE = (250, 234, 167)
+HEX_MOVE_FILL = (111, 201, 136)
+HEX_MOVE_LINE = (194, 247, 205)
 BOARD_SHADOW = (6, 9, 13)
 BASE_HEX_SIZE = 31
 HEX_SIZE = BASE_HEX_SIZE
@@ -271,6 +272,66 @@ def _step_full_turn(
     return red_info, blue_info, red_actions, blue_actions
 
 
+def _is_human_agent_key(agent_key: str) -> bool:
+    return agent_key == "human"
+
+
+def _current_agent_key(env: AgeGridEnv, red_index: int, blue_index: int) -> str:
+    return AGENT_SPECS[red_index].key if env.factions[env.current_player] == "Red" else AGENT_SPECS[blue_index].key
+
+
+def _match_has_human_players(red_index: int, blue_index: int) -> bool:
+    return _is_human_agent_key(AGENT_SPECS[red_index].key) or _is_human_agent_key(AGENT_SPECS[blue_index].key)
+
+
+def _valid_human_move_targets(env: AgeGridEnv, unit, moved_units: set[int]) -> list[tuple[int, int]]:
+    if unit.faction != env.factions[env.current_player]:
+        return []
+    if unit.id in moved_units or env.actions_left <= 0 or env.attempts_left <= 0:
+        return []
+
+    valid_targets: list[tuple[int, int]] = []
+    for pos in hexgrid.neighbors(unit.position):
+        if not env._in_bounds(pos):
+            continue
+        if movement.can_move_towards(env, unit.id, pos):
+            valid_targets.append(pos)
+    return valid_targets
+
+
+def _advance_until_human_or_end(
+    env: AgeGridEnv,
+    red_agent,
+    blue_agent,
+    red_index: int,
+    blue_index: int,
+    red_info: FactionTurnInfo,
+    blue_info: FactionTurnInfo,
+) -> tuple[FactionTurnInfo, FactionTurnInfo, list[TurnSnapshot], list[VisualEffect]]:
+    completed_rounds: list[TurnSnapshot] = []
+    effects: list[VisualEffect] = []
+
+    while env.winner() is None:
+        current_faction = env.factions[env.current_player]
+        if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
+            break
+
+        agent = red_agent if current_faction == "Red" else blue_agent
+        info, actions = _step_faction_with_trace(env, agent)
+        effects.extend(_effects_from_actions(env, actions, current_faction))
+
+        if current_faction == "Red":
+            red_info = info
+        else:
+            blue_info = info
+
+        env.step_end_turn()
+        if env.current_player == 0:
+            completed_rounds.append(TurnSnapshot(env.turn, red_info, blue_info))
+
+    return red_info, blue_info, completed_rounds, effects
+
+
 def _wrap_lines(text: str, font: pygame.font.Font, width: int) -> list[str]:
     if not text:
         return [""]
@@ -399,6 +460,7 @@ def _draw_top_bar(
     rect: pygame.Rect,
     button_rect: pygame.Rect,
     winner: str | None,
+    button_label: str = "Next Turn",
 ) -> None:
     _draw_panel(surface, rect, fill=(16, 22, 30), border=PANEL_SOFT, radius=16)
     left_x = rect.x + 20
@@ -422,7 +484,7 @@ def _draw_top_bar(
     pygame.draw.rect(glow, (*btn_border, 55 if winner is None else 20), glow.get_rect(), border_radius=16)
     surface.blit(glow, (button_rect.x - 9, button_rect.y - 9))
     _draw_panel(surface, button_rect, fill=btn_fill, border=btn_border, radius=12)
-    label = "Next Turn" if winner is None else "Game Over"
+    label = button_label if winner is None else "Game Over"
     _draw_shadow_text(
         surface,
         body_font,
@@ -1625,7 +1687,7 @@ def _draw_setup_screen(
     red_card = pygame.Rect(40, card_y, card_w, card_h)
     blue_card = pygame.Rect(width_px - 40 - card_w, card_y, card_w, card_h)
     tips = [
-        "Controls after start: Space / Enter or click Next Turn.",
+        "Controls after start: Human uses left click + Space, AI uses Next Turn.",
         "R resets to setup. P saves a debug snapshot. Esc closes the viewer.",
     ]
     tips_height = len(tips) * 18
@@ -1799,6 +1861,10 @@ def run_viewer() -> None:
     blue_info = FactionTurnInfo("Blue", [])
     turn_history: list[TurnSnapshot] = []
     effects: list[VisualEffect] = []
+    human_moved_units: set[int] = set()
+    human_turn_actions: list[tuple | None] = []
+    human_turn_log: list[str] = []
+    active_human_faction: str | None = None
     show_tech_tree = False
     show_debug = False
     event_scroll = 0
@@ -1859,10 +1925,17 @@ def run_viewer() -> None:
                         blue_info = FactionTurnInfo("Blue", [])
                         turn_history = []
                         effects = []
+                        human_moved_units = set()
+                        human_turn_actions = []
+                        human_turn_log = []
+                        active_human_faction = None
                         selected_tile = None
                         selected_unit_id = None
                         camera_zoom = _set_hex_zoom(1.0)
                         camera_pan = [0.0, 0.0]
+                        if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
+                            env.start_faction_turn()
+                            active_human_faction = env.factions[env.current_player]
                         in_setup = False
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if red_card.collidepoint(event.pos):
@@ -1879,12 +1952,30 @@ def run_viewer() -> None:
                         blue_info = FactionTurnInfo("Blue", [])
                         turn_history = []
                         effects = []
+                        human_moved_units = set()
+                        human_turn_actions = []
+                        human_turn_log = []
+                        active_human_faction = None
                         selected_tile = None
                         selected_unit_id = None
                         camera_zoom = _set_hex_zoom(1.0)
                         camera_pan = [0.0, 0.0]
+                        if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
+                            env.start_faction_turn()
+                            active_human_faction = env.factions[env.current_player]
                         in_setup = False
             continue
+
+        current_faction = env.factions[env.current_player]
+        current_agent_key = _current_agent_key(env, red_index, blue_index)
+        human_turn_active = _is_human_agent_key(current_agent_key)
+        has_human_players = _match_has_human_players(red_index, blue_index)
+        if human_turn_active and active_human_faction != current_faction:
+            env.start_faction_turn()
+            active_human_faction = current_faction
+            human_moved_units = set()
+            human_turn_actions = []
+            human_turn_log = []
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -1896,6 +1987,10 @@ def run_viewer() -> None:
                 elif event.key == pygame.K_r:
                     in_setup = True
                     show_tech_tree = False
+                    human_moved_units = set()
+                    human_turn_actions = []
+                    human_turn_log = []
+                    active_human_faction = None
                     selected_tile = None
                     selected_unit_id = None
                     camera_zoom = _set_hex_zoom(1.0)
@@ -1918,10 +2013,43 @@ def run_viewer() -> None:
                     print(f"\nSaved debug snapshot to: {output_path}\n")
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     if env.winner() is None:
-                        red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
-                        turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
-                        effects.extend(_effects_from_actions(env, red_actions, "Red"))
-                        effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                        if not has_human_players:
+                            red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
+                            turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                            effects.extend(_effects_from_actions(env, red_actions, "Red"))
+                            effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                        else:
+                            if human_turn_active:
+                                completed_info = _build_turn_info(
+                                    current_faction,
+                                    human_turn_actions,
+                                    human_turn_log or ["stop"],
+                                    list(env.current_events),
+                                )
+                                if current_faction == "Red":
+                                    red_info = completed_info
+                                else:
+                                    blue_info = completed_info
+
+                                human_moved_units = set()
+                                human_turn_actions = []
+                                human_turn_log = []
+                                active_human_faction = None
+                                env.step_end_turn()
+                                if env.current_player == 0:
+                                    turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+
+                            red_info, blue_info, new_rounds, new_effects = _advance_until_human_or_end(
+                                env,
+                                red_agent,
+                                blue_agent,
+                                red_index,
+                                blue_index,
+                                red_info,
+                                blue_info,
+                            )
+                            turn_history.extend(new_rounds)
+                            effects.extend(new_effects)
                         event_scroll = 0
 
             if event.type == pygame.MOUSEWHEEL:
@@ -1948,10 +2076,43 @@ def run_viewer() -> None:
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if btn_rect.collidepoint(event.pos) and env.winner() is None:
-                    red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
-                    turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
-                    effects.extend(_effects_from_actions(env, red_actions, "Red"))
-                    effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                    if not has_human_players:
+                        red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
+                        turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                        effects.extend(_effects_from_actions(env, red_actions, "Red"))
+                        effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
+                    else:
+                        if human_turn_active:
+                            completed_info = _build_turn_info(
+                                current_faction,
+                                human_turn_actions,
+                                human_turn_log or ["stop"],
+                                list(env.current_events),
+                            )
+                            if current_faction == "Red":
+                                red_info = completed_info
+                            else:
+                                blue_info = completed_info
+
+                            human_moved_units = set()
+                            human_turn_actions = []
+                            human_turn_log = []
+                            active_human_faction = None
+                            env.step_end_turn()
+                            if env.current_player == 0:
+                                turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+
+                        red_info, blue_info, new_rounds, new_effects = _advance_until_human_or_end(
+                            env,
+                            red_agent,
+                            blue_agent,
+                            red_index,
+                            blue_index,
+                            red_info,
+                            blue_info,
+                        )
+                        turn_history.extend(new_rounds)
+                        effects.extend(new_effects)
                     event_scroll = 0
                 elif selected_unit_close_rect.collidepoint(event.pos):
                     selected_unit_id = None
@@ -1962,16 +2123,36 @@ def run_viewer() -> None:
                     camera_zoom = _set_hex_zoom(1.0)
                     camera_pan = [0.0, 0.0]
                 elif board_rect.inflate(18, 18).collidepoint(event.pos):
-                    selected_tile = hexgrid.nearest_hex(
+                    clicked_tile = hexgrid.nearest_hex(
                         event.pos,
                         env.config.width,
                         env.config.height,
                         HEX_SIZE,
                         board_origin,
                     )
-                    if selected_tile is not None:
-                        selected_unit = next((u for u in env.units if u.position == selected_tile), None)
-                        selected_unit_id = selected_unit.id if selected_unit is not None else None
+                    if clicked_tile is not None:
+                        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
+                        valid_targets = (
+                            _valid_human_move_targets(env, selected_unit, human_moved_units)
+                            if human_turn_active and selected_unit is not None
+                            else []
+                        )
+                        if clicked_tile in valid_targets and selected_unit is not None:
+                            action = ("move_towards", selected_unit.id, clicked_tile)
+                            ok, reason = env.apply_action(action)
+                            if ok:
+                                human_moved_units.add(selected_unit.id)
+                                human_turn_actions.append(action)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [action], current_faction))
+                                selected_tile = selected_unit.position
+                            else:
+                                selected_tile = clicked_tile
+                        else:
+                            selected_tile = clicked_tile
+
+                        clicked_unit = next((u for u in env.units if u.position == selected_tile), None)
+                        selected_unit_id = clicked_unit.id if clicked_unit is not None else None
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
                 if board_backdrop.collidepoint(event.pos):
                     panning = True
@@ -2013,9 +2194,12 @@ def run_viewer() -> None:
         red_military = sum(1 for u in env.units if u.faction == "Red" and u.attack_damage > 0)
         blue_military = sum(1 for u in env.units if u.faction == "Blue" and u.attack_damage > 0)
         winner = env.winner()
+        current_agent_key = _current_agent_key(env, red_index, blue_index)
+        human_turn_active = _is_human_agent_key(current_agent_key)
+        turn_button_label = "End Turn" if human_turn_active and winner is None else "Next Turn"
 
         top_bar_rect = pygame.Rect(board_x, pad, default_board_width, 96)
-        _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner)
+        _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner, turn_button_label)
 
         red_mode = "Defense" if defense_mode_active(env, "Red") else "Push" if push_mode_active(env, "Red") else "Field"
         blue_mode = "Defense" if defense_mode_active(env, "Blue") else "Push" if push_mode_active(env, "Blue") else "Field"
@@ -2072,6 +2256,11 @@ def run_viewer() -> None:
         camera_btn_rect = pygame.Rect(board_backdrop.right - 86, board_backdrop.y + 11, 74, 30)
         _draw_small_button(screen, tiny, camera_btn_rect, "Reset")
 
+        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
+        valid_move_targets: set[tuple[int, int]] = set()
+        if human_turn_active and selected_unit is not None:
+            valid_move_targets = set(_valid_human_move_targets(env, selected_unit, human_moved_units))
+
         previous_clip = screen.get_clip()
         screen.set_clip(inset)
         for row in range(env.config.height):
@@ -2088,6 +2277,16 @@ def run_viewer() -> None:
                     fill = GRID_BG if (col + row) % 2 == 0 else GRID_ALT
                     pygame.draw.polygon(screen, fill, points)
                 pygame.draw.polygon(screen, GRID_LINE, points, width=1)
+
+                if pos in valid_move_targets:
+                    highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
+                    pygame.draw.polygon(
+                        highlight,
+                        (*HEX_MOVE_FILL, 68),
+                        [(x - bounds.x, y - bounds.y) for x, y in points],
+                    )
+                    screen.blit(highlight, bounds.topleft)
+                    pygame.draw.polygon(screen, HEX_MOVE_LINE, points, width=3)
 
                 if selected_tile == pos:
                     highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
@@ -2185,7 +2384,6 @@ def run_viewer() -> None:
                 hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
                 _draw_hover_tile_panel(screen, small, tiny, hover_rect, hover_lines)
 
-        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
         if selected_unit is None:
             selected_unit_id = None
             selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)

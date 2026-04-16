@@ -7,6 +7,11 @@ from src.agegrid.agents.heuristic import HEURISTIC_PROFILES, HeuristicAgent
 from src.agegrid.agents.random import RandomAgent
 
 
+class HumanAgent:
+    def act(self, env):
+        return None
+
+
 @dataclass(frozen=True)
 class AgentSpec:
     key: str
@@ -15,6 +20,7 @@ class AgentSpec:
 
 
 AGENT_SPECS: tuple[AgentSpec, ...] = (
+    AgentSpec("human", "Human", "Manual control for selecting units and moving them during your turn."),
     AgentSpec("heuristic", "Heuristic", "Balanced planner that develops, defends, and pushes with combined arms."),
     AgentSpec("greedy", "Greedy", "Economic-biased heuristic that develops efficiently before committing."),
     AgentSpec("aggressive", "Aggressive", "Pushes pressure earlier with leaner home defense and more cavalry."),
@@ -24,6 +30,8 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
 
 
 def create_agent(key: str, *, seed: int = 0):
+    if key == "human":
+        return HumanAgent()
     if key == "heuristic":
         return HeuristicAgent(profile=HEURISTIC_PROFILES["balanced"])
     if key == "greedy":

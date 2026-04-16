@@ -21,7 +21,7 @@ def _resolved_target(env, unit, target: Position) -> Position | None:
 
 
 def move_unit(env, unit_id: int, direction: str) -> bool:
-    unit = next((u for u in env.units if u.id == unit_id), None)
+    unit = env.get_unit(unit_id)
     if unit is None:
         return False
 
@@ -40,7 +40,7 @@ def move_unit(env, unit_id: int, direction: str) -> bool:
 
 
 def can_move_unit(env, unit_id: int, direction: str) -> bool:
-    unit = next((u for u in env.units if u.id == unit_id), None)
+    unit = env.get_unit(unit_id)
     if unit is None:
         return False
 
@@ -58,7 +58,7 @@ def can_move_unit(env, unit_id: int, direction: str) -> bool:
 
 
 def can_move_towards(env, unit_id: int, target: Position) -> bool:
-    unit = next((u for u in env.units if u.id == unit_id), None)
+    unit = env.get_unit(unit_id)
     if unit is None:
         return False
     resolved_target = _resolved_target(env, unit, target)
@@ -85,7 +85,7 @@ def can_move_towards(env, unit_id: int, target: Position) -> bool:
 
 
 def move_towards(env, unit_id: int, target: Position) -> bool:
-    unit = next((u for u in env.units if u.id == unit_id), None)
+    unit = env.get_unit(unit_id)
     if unit is None:
         return False
     resolved_target = _resolved_target(env, unit, target)

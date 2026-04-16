@@ -131,7 +131,7 @@ def _has_required_tech(env, faction: str, required_tech: str | None) -> bool:
 def _has_required_building(env, faction: str, required_building: str | None) -> bool:
     if required_building is None:
         return True
-    return any(b.faction == faction and b.building_type == required_building for b in env.buildings)
+    return any(building.building_type == required_building for building in env.get_buildings_for_faction(faction))
 
 
 def _adjacent_spawn_positions(env, faction: str) -> list[Position]:
@@ -151,7 +151,7 @@ def can_train_unit(env, faction: str, unit_type: str) -> bool:
     if not _has_required_building(env, faction, spec.required_building):
         return False
 
-    workers = [u for u in env.units if u.faction == faction and u.unit_type == "worker"]
+    workers = [unit for unit in env.get_units_for_faction(faction) if unit.unit_type == "worker"]
     if unit_type == "worker" and len(workers) >= env.config.max_workers:
         return False
 
@@ -188,7 +188,7 @@ def spawn_worker(env, faction: str) -> bool:
 
 def can_build(env, faction: str, worker_id: int, building_type: str, pos: Position) -> bool:
     spec = building_stats(env, faction, building_type)
-    worker = next((u for u in env.units if u.id == worker_id), None)
+    worker = env.get_unit(worker_id)
     if spec is None or worker is None:
         return False
     if worker.faction != faction or worker.unit_type != "worker":

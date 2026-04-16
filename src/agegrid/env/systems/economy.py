@@ -8,7 +8,7 @@ Position = Tuple[int, int]
 # Gather Resources
 
 def gather(env, worker_id: int) -> bool:
-    unit = next((u for u in env.units if u.id == worker_id), None)
+    unit = env.get_unit(worker_id)
     if unit is None or unit.unit_type != "worker":
         return False
 

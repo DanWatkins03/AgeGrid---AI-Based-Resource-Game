@@ -1420,6 +1420,30 @@ class CombatAndVictoryTests(unittest.TestCase):
         self.assertIn(("move_towards", worker.id, env.bases["Blue"].position), legal)
 
 
+class EnvironmentRefactorTests(unittest.TestCase):
+    def test_unit_lookup_helpers_stay_in_sync_when_units_are_removed(self) -> None:
+        env = make_env()
+        red_worker = env.get_units_for_faction("Red")[0]
+        blue_worker = env.get_units_for_faction("Blue")[0]
+
+        self.assertIs(env.get_unit(red_worker.id), red_worker)
+        self.assertEqual([unit.id for unit in env.get_enemy_units("Red")], [blue_worker.id])
+
+        env._remove_unit(red_worker.id)
+
+        self.assertIsNone(env.get_unit(red_worker.id))
+        self.assertEqual(env.get_units_for_faction("Red"), [])
+
+    def test_building_lookup_helpers_return_spawned_buildings(self) -> None:
+        env = make_env()
+
+        env._spawn_building("Red", "storehouse", 18, (3, 3))
+        building = env.get_buildings_for_faction("Red")[0]
+
+        self.assertIs(env.get_building(building.id), building)
+        self.assertEqual(building.position, (3, 3))
+
+
 class MovementSystemTests(unittest.TestCase):
     def test_move_towards_routes_around_blocker(self) -> None:
         env = make_env()

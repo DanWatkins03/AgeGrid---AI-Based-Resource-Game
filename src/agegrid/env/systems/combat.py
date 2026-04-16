@@ -25,8 +25,8 @@ def _structure_attack_stats(env, building) -> tuple[int, int]:
 
 
 def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
-    attacker = next((u for u in env.units if u.id == attacker_id), None)
-    target = next((u for u in env.units if u.id == target_id), None)
+    attacker = env.get_unit(attacker_id)
+    target = env.get_unit(target_id)
 
     if attacker is None or target is None:
         return False
@@ -51,7 +51,7 @@ def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
 
 
 def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> bool:
-    attacker = next((u for u in env.units if u.id == attacker_id), None)
+    attacker = env.get_unit(attacker_id)
     target_base = env.bases.get(target_faction)
 
     if attacker is None or target_base is None:
@@ -90,7 +90,7 @@ def _base_attack_stats(env, faction: str) -> tuple[int, int]:
 
 def resolve_defensive_fire(env, faction: str) -> list[str]:
     events: list[str] = []
-    enemy_units = [u for u in env.units if u.faction != faction]
+    enemy_units = env.get_enemy_units(faction)
     if not enemy_units:
         return events
 
