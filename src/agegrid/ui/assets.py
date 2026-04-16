@@ -70,7 +70,7 @@ class BoardAssets:
                 ]
             ),
             "storehouse": _load_first([object_root / "store.png", object_root / "mill_house.png", object_root / "cargo.png"]),
-            "barracks": _load_first([object_root / "militaryTent.png", object_root / "militaryOutlook.png"]),
+            "barracks": _load_first([object_root / "Barracks.png", object_root / "militaryOutlook.png"]),
             "stable": _load_first([object_root / "horseTrough.png", object_root / "hay.png"]),
             "quarry": _load_first([object_root / "mine.png", object_root / "rockGrey_large.png"]),
             "archer_tower": _load_first([object_root / "tower.png", object_root / "turret_small.png"]),

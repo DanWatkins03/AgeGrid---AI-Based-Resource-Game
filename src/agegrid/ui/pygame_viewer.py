@@ -1671,6 +1671,14 @@ def _safe_scale(surface: pygame.Surface | None, size: tuple[int, int]) -> pygame
         return None
     return pygame.transform.smoothscale(surface, size)
 
+def _trim_sprite_alpha(sprite: pygame.Surface | None) -> pygame.Surface | None:
+    if sprite is None:
+        return None
+    bounds = sprite.get_bounding_rect(min_alpha=1)
+    if bounds.width <= 0 or bounds.height <= 0:
+        return sprite
+    return sprite.subsurface(bounds).copy()
+
 
 def _blit_centered(surface: pygame.Surface, sprite: pygame.Surface | None, center: tuple[int, int], offset_y: int = 0) -> None:
     if sprite is None:
@@ -1729,7 +1737,8 @@ def _draw_asset_marker(
     anchor_mode: str = "bottom",
     offset_y: int = 0,
 ) -> None:
-    scaled = _safe_scale(sprite, scale)
+    trimmed = _trim_sprite_alpha(sprite)
+    scaled = _safe_scale(trimmed, scale)
     if scaled is not None:
         if anchor_mode == "bottom":
             _blit_bottom_centered(surface, scaled, center, offset_y=offset_y)
@@ -2934,62 +2943,122 @@ def run_viewer() -> None:
             if r.id not in visible_special_resources:
                 continue
             center = _hex_center(r.position[0], r.position[1], board_origin)
-            _draw_soft_shadow(screen, (center[0], center[1] + 14), 34, 14, alpha=60)
+
+            resource_scale = max(20, int(HEX_SIZE * 1.15))
+            resource_shadow_w = max(18, int(HEX_SIZE * 1.1))
+            resource_shadow_h = max(8, int(HEX_SIZE * 0.45))
+            resource_offset_y = int(HEX_SIZE * 0.58)
+
+            _draw_soft_shadow(
+                screen,
+                (center[0], center[1] + resource_offset_y - 4),
+                resource_shadow_w,
+                resource_shadow_h,
+                alpha=60,
+            )
+
             sprite_key = "horses" if r.resource_type == "horses" else "stone" if r.resource_type == "stone" else "resource"
             _draw_asset_marker(
                 screen,
                 board_assets.object_sprite(sprite_key),
                 center,
                 lambda resource=r, resource_center=center: _draw_resource_icon(screen, resource, resource_center, tiny),
-                scale=(36, 36),
-                offset_y=10,
+                scale=(resource_scale, resource_scale),
+                offset_y=resource_offset_y,
             )
 
         for faction, base in env.bases.items():
             color = RED_PRIMARY if faction == "Red" else BLUE_PRIMARY
             center = _hex_center(base.position[0], base.position[1], board_origin)
             bounds = _hex_bounds(base.position[0], base.position[1], board_origin)
-            _draw_soft_shadow(screen, (center[0], center[1] + 20), 50, 18, alpha=78)
-            pygame.draw.circle(screen, (*color, 90), (center[0], center[1] + 2), 26, width=4)
+
+            base_scale = max(30, int(HEX_SIZE * 1.8))
+            base_shadow_w = max(24, int(HEX_SIZE * 1.6))
+            base_shadow_h = max(10, int(HEX_SIZE * 0.6))
+            base_offset_y = int(HEX_SIZE * 0.7)
+            base_ring_radius = max(14, int(HEX_SIZE * 0.85))
+            base_circle_radius = max(12, int(HEX_SIZE * 0.65))
+
+            _draw_soft_shadow(
+                screen,
+                (center[0], center[1] + base_offset_y - 2),
+                base_shadow_w,
+                base_shadow_h,
+                alpha=78,
+            )
+            pygame.draw.circle(screen, (*color, 90), (center[0], center[1] + 2), base_ring_radius, width=4)
             _draw_asset_marker(
                 screen,
                 board_assets.object_sprite("base"),
                 center,
-                lambda base_center=center, faction_color=color: pygame.draw.circle(screen, faction_color, base_center, 20),
+                lambda base_center=center, faction_color=color: pygame.draw.circle(screen, faction_color, base_center, base_circle_radius),
                 tint=color,
-                scale=(56, 56),
-                offset_y=12,
+                scale=(base_scale, base_scale),
+                offset_y=base_offset_y,
             )
+
             hp_chip = pygame.Rect(bounds.centerx - 18, bounds.bottom - 12, 36, 22)
             pygame.draw.rect(screen, (16, 21, 28), hp_chip, border_radius=10)
             pygame.draw.rect(screen, color, hp_chip, width=2, border_radius=10)
             _draw_shadow_text(screen, tiny, str(base.hp), hp_chip.x + 10, hp_chip.y + 2, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
-        for b in env.buildings:
-            color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
-            center = _hex_center(b.position[0], b.position[1], board_origin)
-            rect = pygame.Rect(center[0] - 18, center[1] - 22, 36, 36)
-            _draw_soft_shadow(screen, (center[0], center[1] + 18), 42, 16, alpha=70)
-            _draw_asset_marker(
-                screen,
-                board_assets.object_sprite(b.building_type),
-                center,
-                lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
-                tint=color,
-                scale=(44, 44),
-                offset_y=12,
-            )
+            for b in env.buildings:
+                color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
+                center = _hex_center(b.position[0], b.position[1], board_origin)
+
+                building_scale = max(24, int(HEX_SIZE * 1.4))
+                building_rect_size = max(20, int(HEX_SIZE * 1.15))
+                building_shadow_w = max(20, int(HEX_SIZE * 1.35))
+                building_shadow_h = max(8, int(HEX_SIZE * 0.5))
+                building_offset_y = int(HEX_SIZE * 0.64)
+
+                rect = pygame.Rect(
+                    center[0] - building_rect_size // 2,
+                    center[1] - int(HEX_SIZE * 0.7),
+                    building_rect_size,
+                    building_rect_size,
+                )
+
+                _draw_soft_shadow(
+                    screen,
+                    (center[0], center[1] + building_offset_y - 2),
+                    building_shadow_w,
+                    building_shadow_h,
+                    alpha=70,
+                )
+                _draw_asset_marker(
+                    screen,
+                    board_assets.object_sprite(b.building_type),
+                    center,
+                    lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
+                    tint=color,
+                    scale=(building_scale, building_scale),
+                    offset_y=building_offset_y,
+                )
 
         for u in env.units:
             cx, cy = _hex_center(u.position[0], u.position[1], board_origin)
             color = (242, 206, 142) if u.faction == "Red" else (189, 225, 255)
             border = RED_PRIMARY if u.faction == "Red" else BLUE_PRIMARY
-            _draw_soft_shadow(screen, (cx, cy + 18), 28, 12, alpha=64)
+
+            unit_size = max(18, int(HEX_SIZE * 0.97))
+            unit_shadow_w = max(16, int(HEX_SIZE * 0.9))
+            unit_shadow_h = max(7, int(HEX_SIZE * 0.38))
+            unit_offset_y = int(HEX_SIZE * 0.03)
+
+            select_radius = max(14, int(HEX_SIZE * 0.78))
+            select_outer_radius = max(16, int(HEX_SIZE * 0.87))
+            select_y = cy + int(HEX_SIZE * 0.06)
+
+            _draw_soft_shadow(screen, (cx, cy + int(HEX_SIZE * 0.58)), unit_shadow_w, unit_shadow_h, alpha=64)
+
             if selected_unit_id == u.id:
-                pygame.draw.circle(screen, (*HEX_SELECT_FILL, 90), (cx, cy + 2), 24, width=4)
-                pygame.draw.circle(screen, (*border, 105), (cx, cy + 2), 27, width=2)
-            if not _draw_unit_sprite(screen, board_assets, env, u, (cx, cy + 1), color, border, size=30):
-                _draw_unit_icon(screen, u, (cx, cy + 1), color, border)
+                pygame.draw.circle(screen, (*HEX_SELECT_FILL, 90), (cx, select_y), select_radius, width=4)
+                pygame.draw.circle(screen, (*border, 105), (cx, select_y), select_outer_radius, width=2)
+
+            draw_center = (cx, cy + unit_offset_y)
+            if not _draw_unit_sprite(screen, board_assets, env, u, draw_center, color, border, size=unit_size):
+                _draw_unit_icon(screen, u, draw_center, color, border)
 
         _draw_effects(screen, effects, board_origin[0], board_origin[1], HEX_WIDTH, small)
         screen.set_clip(previous_clip)
