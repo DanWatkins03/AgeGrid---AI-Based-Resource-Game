@@ -69,6 +69,8 @@ HEX_SELECT_FILL = (245, 216, 120)
 HEX_SELECT_LINE = (250, 234, 167)
 HEX_MOVE_FILL = (111, 201, 136)
 HEX_MOVE_LINE = (194, 247, 205)
+HEX_BUILD_FILL = (214, 164, 92)
+HEX_BUILD_LINE = (248, 220, 168)
 BOARD_SHADOW = (6, 9, 13)
 BASE_HEX_SIZE = 31
 HEX_SIZE = BASE_HEX_SIZE
@@ -287,7 +289,7 @@ def _match_has_human_players(red_index: int, blue_index: int) -> bool:
 def _valid_human_move_targets(env: AgeGridEnv, unit, moved_units: set[int]) -> list[tuple[int, int]]:
     if unit.faction != env.factions[env.current_player]:
         return []
-    if unit.id in moved_units or env.actions_left <= 0 or env.attempts_left <= 0:
+    if env.actions_left <= 0 or env.attempts_left <= 0:
         return []
 
     valid_targets: list[tuple[int, int]] = []
@@ -297,6 +299,134 @@ def _valid_human_move_targets(env: AgeGridEnv, unit, moved_units: set[int]) -> l
         if movement.can_move_towards(env, unit.id, pos):
             valid_targets.append(pos)
     return valid_targets
+
+
+def _can_human_gather(env: AgeGridEnv, unit, moved_units: set[int]) -> bool:
+    if unit is None or unit.unit_type != "worker":
+        return False
+    if unit.faction != env.factions[env.current_player]:
+        return False
+    if env.actions_left <= 0 or env.attempts_left <= 0:
+        return False
+    return env.resource_at_for_faction(unit.position, unit.faction) is not None
+
+
+def _human_build_targets(env: AgeGridEnv, worker, building_type: str) -> list[tuple[int, int]]:
+    if worker is None or worker.unit_type != "worker":
+        return []
+    return [
+        pos
+        for pos in hexgrid.neighbors(worker.position)
+        if production.can_build(env, worker.faction, worker.id, building_type, pos)
+    ]
+
+
+def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected_tile, pending_build_type: str | None) -> tuple[str | None, list[tuple[str, object, bool]], str | None]:
+    options: list[tuple[str, object, bool]] = []
+    hint: str | None = None
+
+    if selected_unit is not None and selected_unit.faction == faction:
+        if selected_unit.unit_type == "worker":
+            if _can_human_gather(env, selected_unit, set()):
+                options.append(("Gather", ("gather", selected_unit.id), False))
+            for building_type in production.BUILDING_DEFS:
+                if _human_build_targets(env, selected_unit, building_type):
+                    options.append((_building_label(building_type), ("build_mode", building_type), pending_build_type == building_type))
+            if not options:
+                hint = "No worker actions available on this tile."
+            elif pending_build_type is not None:
+                hint = f"Click a highlighted adjacent hex to place {_building_label(pending_build_type)}."
+            return "Worker Actions", options, hint
+
+        return "Unit Actions", options, "Select a worker or base to access build and recruit commands."
+
+    if selected_tile is not None:
+        selected_base = next(((base_faction, base) for base_faction, base in env.bases.items() if base.position == selected_tile), None)
+        if selected_base is not None and selected_base[0] == faction:
+            if production.can_train_unit(env, faction, "worker"):
+                options.append(("Worker", ("spawn_worker",), False))
+            for unit_type in production.UNIT_DEFS:
+                if unit_type == "worker":
+                    continue
+                if production.can_train_unit(env, faction, unit_type):
+                    options.append((UNIT_LABELS.get(unit_type, unit_type.title()), ("train", unit_type), False))
+            if not options:
+                hint = "No recruits available right now."
+            return "Base Actions", options, hint
+
+    return None, [], None
+
+
+def _human_research_options(env: AgeGridEnv, faction: str) -> tuple[str, list[tuple[str, object, bool]], str | None]:
+    state = env.faction_state(faction)
+    if state.tech_in_progress is not None:
+        turns_left = tech.research_turns_remaining(env, faction)
+        hint = f"Researching {_tech_label(state.tech_in_progress)}. {turns_left} turn{'s' if turns_left != 1 else ''} left."
+        return "Research", [], hint
+
+    options: list[tuple[str, object, bool]] = []
+    for tech_id, spec in tech.TECH_DEFS.items():
+        if tech.can_research(env, faction, tech_id):
+            options.append((f"{_tech_label(tech_id)} ({spec.cost})", ("research", tech_id), False))
+
+    hint = None if options else "No research currently available."
+    return "Research", options, hint
+
+
+def _available_research_ids(env: AgeGridEnv, faction: str) -> list[str]:
+    return [tech_id for tech_id in TECH_TREE_ORDER if tech.can_research(env, faction, tech_id)]
+
+
+def _tech_detail_lines(env: AgeGridEnv, faction: str, tech_id: str) -> list[str]:
+    definition = tech.TECH_DEFS[tech_id]
+    state = env.faction_state(faction)
+    if tech_id in state.techs_unlocked:
+        status = "Unlocked"
+    elif state.tech_in_progress == tech_id:
+        status = f"In progress: {tech.research_turns_remaining(env, faction)} turns left"
+    elif tech.can_research(env, faction, tech_id):
+        status = "Available now"
+    else:
+        missing = [_tech_label(req) for req in definition.requires if req not in state.techs_unlocked]
+        status = f"Requires: {', '.join(missing)}" if missing else "Locked"
+    return [
+        f"Cost: {definition.cost}",
+        f"Turns: {definition.turns}",
+        status,
+        f"Unlocks: {_tech_unlock_summary(tech_id)}",
+    ]
+
+
+def _draw_human_action_panel(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    rect: pygame.Rect,
+    title: str,
+    options: list[tuple[str, object, bool]],
+    hint: str | None,
+) -> list[tuple[pygame.Rect, object]]:
+    _draw_panel(surface, rect, fill=(18, 24, 31), border=PANEL_SOFT, radius=12)
+    _draw_shadow_text(surface, title_font, title, rect.x + 12, rect.y + 10, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+
+    button_rects: list[tuple[pygame.Rect, object]] = []
+    columns = 2
+    button_w = (rect.width - 30) // columns
+    button_h = 30
+    y = rect.y + 42
+    for idx, (label, payload, active) in enumerate(options):
+        col = idx % columns
+        row = idx // columns
+        button_rect = pygame.Rect(rect.x + 12 + col * (button_w + 6), y + row * (button_h + 8), button_w, button_h)
+        _draw_small_button(surface, body_font, button_rect, label, active=active)
+        button_rects.append((button_rect, payload))
+
+    if hint:
+        hint_y = y + ((len(options) + 1) // columns) * (button_h + 8) + 4
+        wrapped = _wrap_lines(hint, body_font, rect.width - 24)
+        _draw_text_block(surface, body_font, wrapped, rect.x + 12, hint_y, TEXT_MUTED, 16)
+
+    return button_rects
 
 
 def _advance_until_human_or_end(
@@ -823,6 +953,31 @@ def _draw_small_button(
         shadow=(10, 12, 16),
         shadow_offset=1,
     )
+
+
+def _draw_badge(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    center: tuple[int, int],
+    label: str,
+    fill: tuple[int, int, int] = (188, 74, 68),
+    border: tuple[int, int, int] = (246, 212, 188),
+) -> pygame.Rect:
+    radius = max(11, font.size(label)[0] // 2 + 7)
+    badge_rect = pygame.Rect(center[0] - radius, center[1] - radius, radius * 2, radius * 2)
+    pygame.draw.circle(surface, fill, badge_rect.center, radius)
+    pygame.draw.circle(surface, border, badge_rect.center, radius, width=2)
+    _draw_shadow_text(
+        surface,
+        font,
+        label,
+        badge_rect.centerx - font.size(label)[0] // 2,
+        badge_rect.centery - font.get_height() // 2 + 1,
+        TEXT_PRIMARY,
+        shadow=(10, 12, 16),
+        shadow_offset=1,
+    )
+    return badge_rect
 
 
 def _draw_scaled_sprite(surface: pygame.Surface, sprite: pygame.Surface | None, rect: pygame.Rect) -> bool:
@@ -1460,9 +1615,13 @@ def _draw_tech_tree_overlay(
     surface: pygame.Surface,
     title_font: pygame.font.Font,
     body_font: pygame.font.Font,
+    board_assets: BoardAssets,
     env: AgeGridEnv,
     rect: pygame.Rect,
-) -> None:
+    focus_faction: str,
+    human_turn_active: bool,
+    mouse_pos: tuple[int, int],
+) -> dict[str, pygame.Rect]:
     veil = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
     veil.fill((8, 12, 18, 170))
     surface.blit(veil, (0, 0))
@@ -1493,6 +1652,7 @@ def _draw_tech_tree_overlay(
     _draw_shadow_text(surface, body_font, subtitle, rect.x + 16, rect.y + 46, TEXT_SECONDARY, shadow=(10, 12, 16), shadow_offset=1)
 
     positions = _tech_tree_positions(rect)
+    node_rects: dict[str, pygame.Rect] = {}
     for tech_id, definition in tech.TECH_DEFS.items():
         start = positions[tech_id]
         for req in definition.requires:
@@ -1511,8 +1671,10 @@ def _draw_tech_tree_overlay(
     for tech_id in TECH_TREE_ORDER:
         cx, cy = positions[tech_id]
         node_rect = pygame.Rect(cx - 56, cy - 34, 112, 68)
+        node_rects[tech_id] = node_rect
         red_status = _tech_status(env, "Red", tech_id)
         blue_status = _tech_status(env, "Blue", tech_id)
+        focus_status = _tech_status(env, focus_faction, tech_id)
         unlocked_any = red_status == "Done" or blue_status == "Done"
         ready_any = red_status == "Ready" or blue_status == "Ready"
         active_any = red_status.startswith("Active") or blue_status.startswith("Active")
@@ -1524,7 +1686,12 @@ def _draw_tech_tree_overlay(
         elif ready_any:
             node_fill = (92, 79, 54)
         pygame.draw.rect(surface, node_fill, node_rect, border_radius=14)
-        pygame.draw.rect(surface, (184, 194, 206), node_rect, width=2, border_radius=14)
+        border_color = (184, 194, 206)
+        if human_turn_active and focus_status == "Ready":
+            border_color = (241, 214, 154)
+        if node_rect.collidepoint(mouse_pos):
+            border_color = (224, 233, 242)
+        pygame.draw.rect(surface, border_color, node_rect, width=2, border_radius=14)
 
         style = TECH_ICON_STYLES.get(tech_id, {"label": "?", "bg": (74, 80, 88), "fg": (235, 239, 242)})
         icon_rect = pygame.Rect(node_rect.x + 8, node_rect.y + 8, 24, 24)
@@ -1544,6 +1711,43 @@ def _draw_tech_tree_overlay(
         blue_text = "Done" if blue_status == "Done" else "Act" if blue_status.startswith("Active") else "Go" if blue_status == "Ready" else "-"
         _draw_shadow_text(surface, body_font, f"R {red_text}", red_chip.x + 7, red_chip.y + 1, (244, 184, 180), shadow=(10, 12, 16), shadow_offset=1)
         _draw_shadow_text(surface, body_font, f"B {blue_text}", blue_chip.x + 7, blue_chip.y + 1, (176, 214, 255), shadow=(10, 12, 16), shadow_offset=1)
+
+    hovered_tech_id = next((tech_id for tech_id, node_rect in node_rects.items() if node_rect.collidepoint(mouse_pos)), None)
+    if hovered_tech_id is None:
+        available_focus = _available_research_ids(env, focus_faction)
+        hovered_tech_id = available_focus[0] if available_focus else TECH_TREE_ORDER[0]
+
+    detail_rect = pygame.Rect(rect.right - 268, rect.y + 84, 236, rect.height - 138)
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel"), detail_rect):
+        _draw_panel(surface, detail_rect, fill=(135, 98, 61), border=(193, 149, 98), radius=14)
+    inner = detail_rect.inflate(-18, -22)
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel_inset"), inner):
+        pygame.draw.rect(surface, (216, 193, 144), inner, border_radius=12)
+        pygame.draw.rect(surface, (180, 152, 111), inner, width=2, border_radius=12)
+
+    style = TECH_ICON_STYLES.get(hovered_tech_id, {"label": "?", "bg": (74, 80, 88), "fg": (235, 239, 242)})
+    icon_rect = pygame.Rect(inner.x + 14, inner.y + 14, 34, 34)
+    pygame.draw.rect(surface, style["bg"], icon_rect, border_radius=8)
+    pygame.draw.rect(surface, (236, 240, 244), icon_rect, width=1, border_radius=8)
+    _draw_shadow_text(surface, body_font, style["label"], icon_rect.x + 10, icon_rect.y + 5, style["fg"], shadow=(12, 16, 20), shadow_offset=1)
+    _draw_shadow_text(surface, title_font, _tech_label(hovered_tech_id), inner.x + 58, inner.y + 14, (76, 58, 40), shadow=(244, 226, 190), shadow_offset=0)
+
+    detail_y = inner.y + 60
+    for line in _tech_detail_lines(env, focus_faction, hovered_tech_id):
+        wrapped = _wrap_lines(line, body_font, inner.width - 28)
+        _draw_text_block(surface, body_font, wrapped, inner.x + 14, detail_y, (84, 72, 58), 18)
+        detail_y += len(wrapped) * 18 + 6
+
+    action_hint = (
+        "Click this node to start research."
+        if human_turn_active and tech.can_research(env, focus_faction, hovered_tech_id)
+        else f"Viewing {focus_faction} research state."
+        if not human_turn_active
+        else "Hover another tech to inspect prerequisites."
+    )
+    hint_lines = _wrap_lines(action_hint, body_font, inner.width - 28)
+    _draw_text_block(surface, body_font, hint_lines, inner.x + 14, inner.bottom - 42, (112, 93, 72), 18)
+    return node_rects
 
 
 def _tile_center(ox: int, oy: int, tile: int, pos: tuple[int, int]) -> tuple[int, int]:
@@ -1687,7 +1891,7 @@ def _draw_setup_screen(
     red_card = pygame.Rect(40, card_y, card_w, card_h)
     blue_card = pygame.Rect(width_px - 40 - card_w, card_y, card_w, card_h)
     tips = [
-        "Controls after start: Human uses left click + Space, AI uses Next Turn.",
+        "Controls after start: Human uses left click, G gathers, Space ends turn.",
         "R resets to setup. P saves a debug snapshot. Esc closes the viewer.",
     ]
     tips_height = len(tips) * 18
@@ -1870,10 +2074,13 @@ def run_viewer() -> None:
     event_scroll = 0
     event_panel_rect = pygame.Rect(0, 0, 0, 0)
     tech_btn_rect = pygame.Rect(0, 0, 0, 0)
+    tech_tree_node_rects: dict[str, pygame.Rect] = {}
     camera_btn_rect = pygame.Rect(0, 0, 0, 0)
     selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
+    human_action_button_rects: list[tuple[pygame.Rect, object]] = []
     selected_tile: tuple[int, int] | None = None
     selected_unit_id: int | None = None
+    pending_build_type: str | None = None
     camera_zoom = 1.0
     camera_pan = [0.0, 0.0]
     panning = False
@@ -1931,6 +2138,7 @@ def run_viewer() -> None:
                         active_human_faction = None
                         selected_tile = None
                         selected_unit_id = None
+                        pending_build_type = None
                         camera_zoom = _set_hex_zoom(1.0)
                         camera_pan = [0.0, 0.0]
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
@@ -1958,6 +2166,7 @@ def run_viewer() -> None:
                         active_human_faction = None
                         selected_tile = None
                         selected_unit_id = None
+                        pending_build_type = None
                         camera_zoom = _set_hex_zoom(1.0)
                         camera_pan = [0.0, 0.0]
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
@@ -1993,6 +2202,7 @@ def run_viewer() -> None:
                     active_human_faction = None
                     selected_tile = None
                     selected_unit_id = None
+                    pending_build_type = None
                     camera_zoom = _set_hex_zoom(1.0)
                     camera_pan = [0.0, 0.0]
                 elif event.key == pygame.K_t:
@@ -2011,6 +2221,15 @@ def run_viewer() -> None:
                     output_path = _write_debug_snapshot(snapshot_text)
                     print(snapshot_text)
                     print(f"\nSaved debug snapshot to: {output_path}\n")
+                elif event.key == pygame.K_g and human_turn_active and env.winner() is None:
+                    selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
+                    if _can_human_gather(env, selected_unit, human_moved_units):
+                        action = ("gather", selected_unit.id)
+                        ok, reason = env.apply_action(action)
+                        if ok:
+                            human_turn_actions.append(action)
+                            human_turn_log.append(reason)
+                            effects.extend(_effects_from_actions(env, [action], current_faction))
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     if env.winner() is None:
                         if not has_human_players:
@@ -2035,6 +2254,7 @@ def run_viewer() -> None:
                                 human_turn_actions = []
                                 human_turn_log = []
                                 active_human_faction = None
+                                pending_build_type = None
                                 env.step_end_turn()
                                 if env.current_player == 0:
                                     turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
@@ -2098,6 +2318,7 @@ def run_viewer() -> None:
                             human_turn_actions = []
                             human_turn_log = []
                             active_human_faction = None
+                            pending_build_type = None
                             env.step_end_turn()
                             if env.current_player == 0:
                                 turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
@@ -2114,9 +2335,37 @@ def run_viewer() -> None:
                         turn_history.extend(new_rounds)
                         effects.extend(new_effects)
                     event_scroll = 0
+                elif show_tech_tree and any(node_rect.collidepoint(event.pos) for node_rect in tech_tree_node_rects.values()):
+                    if human_turn_active and env.winner() is None:
+                        clicked_tech_id = next(
+                            (tech_id for tech_id, node_rect in tech_tree_node_rects.items() if node_rect.collidepoint(event.pos)),
+                            None,
+                        )
+                        if clicked_tech_id is not None and tech.can_research(env, current_faction, clicked_tech_id):
+                            payload = ("research", clicked_tech_id)
+                            ok, reason = env.apply_action(payload)
+                            if ok:
+                                human_turn_actions.append(payload)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [payload], current_faction))
+                elif any(button_rect.collidepoint(event.pos) for button_rect, _ in human_action_button_rects):
+                    for button_rect, payload in human_action_button_rects:
+                        if not button_rect.collidepoint(event.pos):
+                            continue
+                        if isinstance(payload, tuple) and payload and payload[0] == "build_mode":
+                            pending_build_type = None if pending_build_type == payload[1] else payload[1]
+                        else:
+                            ok, reason = env.apply_action(payload)
+                            if ok:
+                                human_turn_actions.append(payload)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [payload], current_faction))
+                                pending_build_type = None
+                        break
                 elif selected_unit_close_rect.collidepoint(event.pos):
                     selected_unit_id = None
                     selected_tile = None
+                    pending_build_type = None
                 elif tech_btn_rect.collidepoint(event.pos):
                     show_tech_tree = not show_tech_tree
                 elif camera_btn_rect.collidepoint(event.pos):
@@ -2132,20 +2381,49 @@ def run_viewer() -> None:
                     )
                     if clicked_tile is not None:
                         selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
-                        valid_targets = (
-                            _valid_human_move_targets(env, selected_unit, human_moved_units)
-                            if human_turn_active and selected_unit is not None
+                        valid_build_targets = (
+                            _human_build_targets(env, selected_unit, pending_build_type)
+                            if human_turn_active and pending_build_type is not None and selected_unit is not None
                             else []
                         )
-                        if clicked_tile in valid_targets and selected_unit is not None:
-                            action = ("move_towards", selected_unit.id, clicked_tile)
+                        valid_targets = (
+                            _valid_human_move_targets(env, selected_unit, human_moved_units)
+                            if human_turn_active and pending_build_type is None and selected_unit is not None
+                            else []
+                        )
+                        if clicked_tile in valid_build_targets and selected_unit is not None and pending_build_type is not None:
+                            action = ("build", selected_unit.id, pending_build_type, clicked_tile)
                             ok, reason = env.apply_action(action)
                             if ok:
-                                human_moved_units.add(selected_unit.id)
+                                human_turn_actions.append(action)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [action], current_faction))
+                                pending_build_type = None
+                                selected_tile = clicked_tile
+                                selected_unit_id = None
+                        elif (
+                            human_turn_active
+                            and selected_unit is not None
+                            and clicked_tile == selected_unit.position
+                            and _can_human_gather(env, selected_unit, human_moved_units)
+                        ):
+                            action = ("gather", selected_unit.id)
+                            ok, reason = env.apply_action(action)
+                            if ok:
                                 human_turn_actions.append(action)
                                 human_turn_log.append(reason)
                                 effects.extend(_effects_from_actions(env, [action], current_faction))
                                 selected_tile = selected_unit.position
+                                pending_build_type = None
+                        elif clicked_tile in valid_targets and selected_unit is not None:
+                            action = ("move_towards", selected_unit.id, clicked_tile)
+                            ok, reason = env.apply_action(action)
+                            if ok:
+                                human_turn_actions.append(action)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [action], current_faction))
+                                selected_tile = selected_unit.position
+                                pending_build_type = None
                             else:
                                 selected_tile = clicked_tile
                         else:
@@ -2153,6 +2431,8 @@ def run_viewer() -> None:
 
                         clicked_unit = next((u for u in env.units if u.position == selected_tile), None)
                         selected_unit_id = clicked_unit.id if clicked_unit is not None else None
+                        if selected_unit_id is None or clicked_unit is None or clicked_unit.unit_type != "worker":
+                            pending_build_type = None
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
                 if board_backdrop.collidepoint(event.pos):
                     panning = True
@@ -2196,6 +2476,8 @@ def run_viewer() -> None:
         winner = env.winner()
         current_agent_key = _current_agent_key(env, red_index, blue_index)
         human_turn_active = _is_human_agent_key(current_agent_key)
+        mouse_pos = pygame.mouse.get_pos()
+        current_research_count = len(_available_research_ids(env, current_faction))
         turn_button_label = "End Turn" if human_turn_active and winner is None else "Next Turn"
 
         top_bar_rect = pygame.Rect(board_x, pad, default_board_width, 96)
@@ -2213,6 +2495,20 @@ def run_viewer() -> None:
         _draw_research_panel(screen, font, tiny, env, research_panel)
         tech_btn_rect = pygame.Rect(research_panel.x, research_panel.bottom + 8, 132, 30)
         _draw_small_button(screen, tiny, tech_btn_rect, "Research Tree", active=show_tech_tree)
+        if current_research_count > 0:
+            _draw_badge(screen, tiny, (tech_btn_rect.right - 8, tech_btn_rect.y + 5), str(current_research_count))
+        if tech_btn_rect.collidepoint(mouse_pos):
+            hover_lines = [
+                "Open the research tree",
+                (
+                    f"{current_research_count} tech{'s' if current_research_count != 1 else ''} available for {current_faction}."
+                    if current_research_count > 0
+                    else f"No techs currently available for {current_faction}."
+                ),
+                "Hover nodes for details. Click a ready node to start it.",
+            ]
+            hover_rect = pygame.Rect(tech_btn_rect.right + 10, tech_btn_rect.y - 8, 190, 78)
+            _draw_hover_tile_panel(screen, small, tiny, hover_rect, hover_lines)
 
         tactical_panel_h = _tactical_panel_height(tiny, env, side_panel - 24)
         tactical_panel = pygame.Rect(sidebar_x + 12, tech_btn_rect.bottom + 10, side_panel - 24, tactical_panel_h)
@@ -2227,7 +2523,6 @@ def run_viewer() -> None:
             winner_text = f"{winner} wins"
             _draw_shadow_text(screen, small, winner_text, btn_rect.x - small.size(winner_text)[0] - 18, btn_rect.y + 12, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
-        mouse_pos = pygame.mouse.get_pos()
         hover_pos = None
         if board_rect.inflate(24, 24).collidepoint(mouse_pos):
             hover_pos = hexgrid.nearest_hex(mouse_pos, env.config.width, env.config.height, HEX_SIZE, board_origin)
@@ -2258,8 +2553,12 @@ def run_viewer() -> None:
 
         selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
         valid_move_targets: set[tuple[int, int]] = set()
+        valid_build_targets: set[tuple[int, int]] = set()
         if human_turn_active and selected_unit is not None:
             valid_move_targets = set(_valid_human_move_targets(env, selected_unit, human_moved_units))
+            if pending_build_type is not None and selected_unit.unit_type == "worker":
+                valid_build_targets = set(_human_build_targets(env, selected_unit, pending_build_type))
+                valid_move_targets = set()
 
         previous_clip = screen.get_clip()
         screen.set_clip(inset)
@@ -2278,7 +2577,16 @@ def run_viewer() -> None:
                     pygame.draw.polygon(screen, fill, points)
                 pygame.draw.polygon(screen, GRID_LINE, points, width=1)
 
-                if pos in valid_move_targets:
+                if pos in valid_build_targets:
+                    highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
+                    pygame.draw.polygon(
+                        highlight,
+                        (*HEX_BUILD_FILL, 72),
+                        [(x - bounds.x, y - bounds.y) for x, y in points],
+                    )
+                    screen.blit(highlight, bounds.topleft)
+                    pygame.draw.polygon(screen, HEX_BUILD_LINE, points, width=3)
+                elif pos in valid_move_targets:
                     highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
                     pygame.draw.polygon(
                         highlight,
@@ -2460,6 +2768,29 @@ def run_viewer() -> None:
             else:
                 selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
 
+        human_action_button_rects = []
+        if human_turn_active:
+            panel_title, panel_options, panel_hint = _human_action_options(
+                env,
+                current_faction,
+                selected_unit,
+                selected_tile,
+                pending_build_type,
+            )
+            if panel_title is not None:
+                action_panel_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 292, 300, 118)
+                human_action_button_rects = _draw_human_action_panel(
+                    screen,
+                    small,
+                    tiny,
+                    action_panel_rect,
+                    panel_title,
+                    panel_options,
+                    panel_hint,
+                )
+        else:
+            pending_build_type = None
+
         if show_debug:
             debug_rect = pygame.Rect(board_x, height_px - 44, 258, 30)
             pygame.draw.rect(screen, (16, 22, 30), debug_rect, border_radius=10)
@@ -2467,16 +2798,27 @@ def run_viewer() -> None:
             _draw_text_block(
                 screen,
                 tiny,
-                ["Debug: D  Snapshot: P  Tech tree: T  Reset: R  Wheel zoom  MMB drag/reset"],
+                ["Debug: D  Snapshot: P  Tech tree: T  Gather: G  Reset: R  Wheel zoom  Middle click reset"],
                 debug_rect.x + 10,
                 debug_rect.y + 7,
                 TEXT_MUTED,
                 16,
             )
 
+        tech_tree_node_rects = {}
         if show_tech_tree:
             overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
-            _draw_tech_tree_overlay(screen, font, tiny, env, overlay_rect)
+            tech_tree_node_rects = _draw_tech_tree_overlay(
+                screen,
+                font,
+                tiny,
+                board_assets,
+                env,
+                overlay_rect,
+                current_faction,
+                human_turn_active,
+                mouse_pos,
+            )
 
         pygame.display.flip()
 
