@@ -47,6 +47,15 @@ class VisualEffect:
     label: str = ""
 
 
+@dataclass(frozen=True)
+class HumanActionOption:
+    label: str
+    payload: object
+    active: bool = False
+    enabled: bool = True
+    reason: str | None = None
+
+
 RED_PRIMARY = (196, 88, 80)
 RED_ACCENT = (241, 202, 160)
 BLUE_PRIMARY = (88, 126, 212)
@@ -321,21 +330,117 @@ def _human_build_targets(env: AgeGridEnv, worker, building_type: str) -> list[tu
     ]
 
 
-def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected_tile, pending_build_type: str | None) -> tuple[str | None, list[tuple[str, object, bool]], str | None]:
-    options: list[tuple[str, object, bool]] = []
+def _turn_budget_reason(env: AgeGridEnv) -> str | None:
+    if env.actions_left <= 0:
+        return "No actions left this turn."
+    if env.attempts_left <= 0:
+        return "No attempts left this turn."
+    return None
+
+
+def _train_option(env: AgeGridEnv, faction: str, unit_type: str) -> HumanActionOption:
+    label = UNIT_LABELS.get(unit_type, unit_type.title()) if unit_type != "worker" else "Worker"
+    payload = ("spawn_worker",) if unit_type == "worker" else ("train", unit_type)
+    budget_reason = _turn_budget_reason(env)
+    if budget_reason:
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason=budget_reason)
+
+    spec = production.unit_stats(env, faction, unit_type)
+    if spec is None:
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason="Unavailable.")
+    cost = env.config.worker_spawn_cost if unit_type == "worker" else spec.cost
+    state = env.faction_state(faction)
+    if state.resources < cost:
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Costs {cost}.")
+    if spec.required_tech and spec.required_tech not in state.techs_unlocked:
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Needs {_tech_label(spec.required_tech)}.")
+    if spec.required_building and not any(
+        building.building_type == spec.required_building for building in env.get_buildings_for_faction(faction)
+    ):
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Needs {_building_label(spec.required_building)}.")
+    if unit_type == "worker":
+        workers = [unit for unit in env.get_units_for_faction(faction) if unit.unit_type == "worker"]
+        if len(workers) >= env.config.max_workers:
+            return HumanActionOption(label=label, payload=payload, enabled=False, reason="Worker cap reached.")
+    occ = env._occupied_positions()
+    if not any(env._in_bounds(pos) and pos not in occ for pos in hexgrid.neighbors(env.bases[faction].position)):
+        return HumanActionOption(label=label, payload=payload, enabled=False, reason="Spawn tiles are blocked.")
+    return HumanActionOption(label=label, payload=payload)
+
+
+def _build_option(env: AgeGridEnv, faction: str, worker, building_type: str, pending_build_type: str | None) -> HumanActionOption:
+    label = _building_label(building_type)
+    payload = ("build_mode", building_type)
+    budget_reason = _turn_budget_reason(env)
+    if budget_reason:
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=budget_reason)
+
+    spec = production.building_stats(env, faction, building_type)
+    if spec is None:
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason="Unavailable.")
+    state = env.faction_state(faction)
+    if state.resources < spec.cost:
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Costs {spec.cost}.")
+    if spec.required_tech and spec.required_tech not in state.techs_unlocked:
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Needs {_tech_label(spec.required_tech)}.")
+    if spec.required_building and not any(
+        building.building_type == spec.required_building for building in env.get_buildings_for_faction(faction)
+    ):
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Needs {_building_label(spec.required_building)}.")
+    if spec.required_resource_adjacent:
+        has_resource_target = any(
+            production.can_build(env, faction, worker.id, building_type, pos) for pos in hexgrid.neighbors(worker.position)
+        )
+        if not has_resource_target:
+            resource_label = RESOURCE_LABELS.get(spec.required_resource_adjacent, spec.required_resource_adjacent.title())
+            return HumanActionOption(
+                label=label,
+                payload=payload,
+                active=pending_build_type == building_type,
+                enabled=False,
+                reason=f"Needs adjacent {resource_label}.",
+            )
+    targets = _human_build_targets(env, worker, building_type)
+    if not targets:
+        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason="No adjacent build tile.")
+    return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type)
+
+
+def _disabled_option_hint(options: list[HumanActionOption]) -> str | None:
+    disabled = [f"{option.label}: {option.reason}" for option in options if not option.enabled and option.reason]
+    if not disabled:
+        return None
+    preview = disabled[:3]
+    return "Unavailable: " + "  ".join(preview)
+
+
+def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected_tile, pending_build_type: str | None) -> tuple[str | None, list[HumanActionOption], str | None]:
+    options: list[HumanActionOption] = []
     hint: str | None = None
 
     if selected_unit is not None and selected_unit.faction == faction:
         if selected_unit.unit_type == "worker":
-            if _can_human_gather(env, selected_unit, set()):
-                options.append(("Gather", ("gather", selected_unit.id), False))
+            gather_reason = _turn_budget_reason(env)
+            if gather_reason is None and env.resource_at_for_faction(selected_unit.position, selected_unit.faction) is None:
+                gather_reason = "Stand on a resource tile."
+            options.append(
+                HumanActionOption(
+                    label="Gather",
+                    payload=("gather", selected_unit.id),
+                    enabled=gather_reason is None,
+                    reason=gather_reason,
+                )
+            )
             for building_type in production.BUILDING_DEFS:
-                if _human_build_targets(env, selected_unit, building_type):
-                    options.append((_building_label(building_type), ("build_mode", building_type), pending_build_type == building_type))
-            if not options:
+                options.append(_build_option(env, faction, selected_unit, building_type, pending_build_type))
+            enabled_options = [option for option in options if option.enabled]
+            if not enabled_options:
                 hint = "No worker actions available on this tile."
             elif pending_build_type is not None:
                 hint = f"Click a highlighted adjacent hex to place {_building_label(pending_build_type)}."
+            disabled_hint = _disabled_option_hint(options)
+            if disabled_hint:
+                hint = f"{hint}  {disabled_hint}" if hint else disabled_hint
             return "Worker Actions", options, hint
 
         return "Unit Actions", options, "Select a worker or base to access build and recruit commands."
@@ -343,15 +448,16 @@ def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected
     if selected_tile is not None:
         selected_base = next(((base_faction, base) for base_faction, base in env.bases.items() if base.position == selected_tile), None)
         if selected_base is not None and selected_base[0] == faction:
-            if production.can_train_unit(env, faction, "worker"):
-                options.append(("Worker", ("spawn_worker",), False))
+            options.append(_train_option(env, faction, "worker"))
             for unit_type in production.UNIT_DEFS:
                 if unit_type == "worker":
                     continue
-                if production.can_train_unit(env, faction, unit_type):
-                    options.append((UNIT_LABELS.get(unit_type, unit_type.title()), ("train", unit_type), False))
-            if not options:
+                options.append(_train_option(env, faction, unit_type))
+            if not any(option.enabled for option in options):
                 hint = "No recruits available right now."
+            disabled_hint = _disabled_option_hint(options)
+            if disabled_hint:
+                hint = f"{hint}  {disabled_hint}" if hint else disabled_hint
             return "Base Actions", options, hint
 
     return None, [], None
@@ -401,32 +507,48 @@ def _draw_human_action_panel(
     surface: pygame.Surface,
     title_font: pygame.font.Font,
     body_font: pygame.font.Font,
+    board_assets: BoardAssets,
     rect: pygame.Rect,
     title: str,
-    options: list[tuple[str, object, bool]],
+    options: list[HumanActionOption],
     hint: str | None,
-) -> list[tuple[pygame.Rect, object]]:
-    _draw_panel(surface, rect, fill=(18, 24, 31), border=PANEL_SOFT, radius=12)
-    _draw_shadow_text(surface, title_font, title, rect.x + 12, rect.y + 10, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+) -> list[tuple[pygame.Rect, object, bool]]:
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel"), rect):
+        _draw_panel(surface, rect, fill=(135, 98, 61), border=(193, 149, 98), radius=14)
+    inner = rect.inflate(-18, -18)
+    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel_inset"), inner):
+        pygame.draw.rect(surface, (216, 193, 144), inner, border_radius=12)
+        pygame.draw.rect(surface, (180, 152, 111), inner, width=2, border_radius=12)
+    _draw_shadow_text(surface, title_font, title, inner.x + 12, inner.y + 8, (83, 66, 48), shadow=(241, 227, 198), shadow_offset=0)
 
-    button_rects: list[tuple[pygame.Rect, object]] = []
+    button_rects: list[tuple[pygame.Rect, object, bool]] = []
     columns = 2
-    button_w = (rect.width - 30) // columns
+    button_w = (inner.width - 18) // columns
     button_h = 30
-    y = rect.y + 42
-    for idx, (label, payload, active) in enumerate(options):
+    y = inner.y + 38
+    for idx, option in enumerate(options):
         col = idx % columns
         row = idx // columns
-        button_rect = pygame.Rect(rect.x + 12 + col * (button_w + 6), y + row * (button_h + 8), button_w, button_h)
-        _draw_small_button(surface, body_font, button_rect, label, active=active)
-        button_rects.append((button_rect, payload))
+        button_rect = pygame.Rect(inner.x + 6 + col * (button_w + 6), y + row * (button_h + 8), button_w, button_h)
+        _draw_parchment_button(surface, body_font, board_assets, button_rect, option.label, active=option.active, enabled=option.enabled)
+        button_rects.append((button_rect, option.payload, option.enabled))
 
     if hint:
         hint_y = y + ((len(options) + 1) // columns) * (button_h + 8) + 4
-        wrapped = _wrap_lines(hint, body_font, rect.width - 24)
-        _draw_text_block(surface, body_font, wrapped, rect.x + 12, hint_y, TEXT_MUTED, 16)
+        wrapped = _wrap_lines(hint, body_font, inner.width - 12)
+        _draw_text_block(surface, body_font, wrapped, inner.x + 6, hint_y, (108, 91, 73), 16)
 
     return button_rects
+
+
+def _human_action_panel_height(body_font: pygame.font.Font, options: list[HumanActionOption], hint: str | None) -> int:
+    columns = 2
+    button_h = 30
+    rows = (len(options) + columns - 1) // columns
+    height = 74 + rows * (button_h + 8)
+    if hint:
+        height += len(_wrap_lines(hint, body_font, 252)) * 16 + 8
+    return max(106, height)
 
 
 def _advance_until_human_or_end(
@@ -590,6 +712,7 @@ def _draw_top_bar(
     rect: pygame.Rect,
     button_rect: pygame.Rect,
     winner: str | None,
+    human_turn_active: bool,
     button_label: str = "Next Turn",
 ) -> None:
     _draw_panel(surface, rect, fill=(16, 22, 30), border=PANEL_SOFT, radius=16)
@@ -606,6 +729,21 @@ def _draw_top_bar(
     status_value = f"{current} -> Blue" if winner is None and current == "Red" else f"Red -> {current}" if winner is None else current
     _draw_shadow_text(surface, body_font, status_label, center_x - body_font.size(status_label)[0] // 2, rect.y + 14, TEXT_SECONDARY, shadow=(8, 10, 14), shadow_offset=1)
     _draw_shadow_text(surface, title_font, status_value, center_x - title_font.size(status_value)[0] // 2, rect.y + 34, current_color, shadow=(6, 8, 12))
+    if human_turn_active and winner is None:
+        budget_rect = pygame.Rect(center_x - 84, rect.y + 64, 168, 22)
+        pygame.draw.rect(surface, PANEL_INSET, budget_rect, border_radius=11)
+        pygame.draw.rect(surface, PANEL_SOFT, budget_rect, width=1, border_radius=11)
+        budget_text = f"Actions {env.actions_left}  Attempts {env.attempts_left}"
+        _draw_shadow_text(
+            surface,
+            body_font,
+            budget_text,
+            budget_rect.centerx - body_font.size(budget_text)[0] // 2,
+            budget_rect.y + 2,
+            TEXT_PRIMARY,
+            shadow=(8, 10, 14),
+            shadow_offset=1,
+        )
 
     btn_fill = (62, 86, 120) if winner is None else (64, 66, 72)
     btn_border = (133, 179, 239) if winner is None else (100, 104, 112)
@@ -939,9 +1077,16 @@ def _draw_small_button(
     rect: pygame.Rect,
     label: str,
     active: bool = False,
+    enabled: bool = True,
 ) -> None:
-    fill = (58, 79, 108) if active else PANEL_INSET
-    border = (132, 176, 232) if active else PANEL_SOFT
+    if not enabled:
+        fill = (34, 39, 47)
+        border = (72, 79, 90)
+        text_color = TEXT_MUTED
+    else:
+        fill = (58, 79, 108) if active else PANEL_INSET
+        border = (132, 176, 232) if active else PANEL_SOFT
+        text_color = TEXT_PRIMARY
     _draw_panel(surface, rect, fill=fill, border=border, radius=10)
     _draw_shadow_text(
         surface,
@@ -949,9 +1094,44 @@ def _draw_small_button(
         label,
         rect.centerx - font.size(label)[0] // 2,
         rect.y + 6,
-        TEXT_PRIMARY,
+        text_color,
         shadow=(10, 12, 16),
         shadow_offset=1,
+    )
+
+
+def _draw_parchment_button(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    board_assets: BoardAssets,
+    rect: pygame.Rect,
+    label: str,
+    active: bool = False,
+    enabled: bool = True,
+) -> None:
+    sprite = board_assets.ui_sprite("button")
+    if sprite is not None:
+        _draw_scaled_sprite(surface, sprite, rect)
+    else:
+        _draw_panel(surface, rect, fill=(159, 118, 76), border=(210, 174, 123), radius=10)
+
+    overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+    if not enabled:
+        overlay.fill((70, 74, 82, 120))
+    elif active:
+        overlay.fill((103, 142, 191, 60))
+    surface.blit(overlay, rect.topleft)
+
+    text_color = (74, 61, 47) if enabled else (120, 116, 110)
+    _draw_shadow_text(
+        surface,
+        font,
+        label,
+        rect.centerx - font.size(label)[0] // 2,
+        rect.y + 6,
+        text_color,
+        shadow=(240, 228, 206) if enabled else (200, 192, 180),
+        shadow_offset=0,
     )
 
 
@@ -2077,7 +2257,7 @@ def run_viewer() -> None:
     tech_tree_node_rects: dict[str, pygame.Rect] = {}
     camera_btn_rect = pygame.Rect(0, 0, 0, 0)
     selected_unit_close_rect = pygame.Rect(0, 0, 0, 0)
-    human_action_button_rects: list[tuple[pygame.Rect, object]] = []
+    human_action_button_rects: list[tuple[pygame.Rect, object, bool]] = []
     selected_tile: tuple[int, int] | None = None
     selected_unit_id: int | None = None
     pending_build_type: str | None = None
@@ -2348,10 +2528,12 @@ def run_viewer() -> None:
                                 human_turn_actions.append(payload)
                                 human_turn_log.append(reason)
                                 effects.extend(_effects_from_actions(env, [payload], current_faction))
-                elif any(button_rect.collidepoint(event.pos) for button_rect, _ in human_action_button_rects):
-                    for button_rect, payload in human_action_button_rects:
+                elif any(button_rect.collidepoint(event.pos) for button_rect, _, _ in human_action_button_rects):
+                    for button_rect, payload, enabled in human_action_button_rects:
                         if not button_rect.collidepoint(event.pos):
                             continue
+                        if not enabled:
+                            break
                         if isinstance(payload, tuple) and payload and payload[0] == "build_mode":
                             pending_build_type = None if pending_build_type == payload[1] else payload[1]
                         else:
@@ -2481,7 +2663,7 @@ def run_viewer() -> None:
         turn_button_label = "End Turn" if human_turn_active and winner is None else "Next Turn"
 
         top_bar_rect = pygame.Rect(board_x, pad, default_board_width, 96)
-        _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner, turn_button_label)
+        _draw_top_bar(screen, big, tiny, env, top_bar_rect, btn_rect, winner, human_turn_active, turn_button_label)
 
         red_mode = "Defense" if defense_mode_active(env, "Red") else "Push" if push_mode_active(env, "Red") else "Field"
         blue_mode = "Defense" if defense_mode_active(env, "Blue") else "Push" if push_mode_active(env, "Blue") else "Field"
@@ -2778,11 +2960,17 @@ def run_viewer() -> None:
                 pending_build_type,
             )
             if panel_title is not None:
-                action_panel_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 292, 300, 118)
+                action_panel_rect = pygame.Rect(
+                    board_backdrop.x + 18,
+                    board_backdrop.y + 292,
+                    300,
+                    _human_action_panel_height(tiny, panel_options, panel_hint),
+                )
                 human_action_button_rects = _draw_human_action_panel(
                     screen,
                     small,
                     tiny,
+                    board_assets,
                     action_panel_rect,
                     panel_title,
                     panel_options,
