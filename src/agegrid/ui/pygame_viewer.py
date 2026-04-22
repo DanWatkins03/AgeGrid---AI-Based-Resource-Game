@@ -20,22 +20,48 @@ from src.agegrid.env.agegrid_env import AgeGridEnv
 from src.agegrid.env import hexgrid
 from src.agegrid.env.systems import movement, production, tech
 from src.agegrid.ui.assets import BoardAssets
-
-
-@dataclass
-class FactionTurnInfo:
-    label: str
-    log: list[str]
-    last_action: str = "-"
-    research: str = "-"
-    attacks: str = "-"
-
-
-@dataclass
-class TurnSnapshot:
-    turn_number: int
-    red: FactionTurnInfo
-    blue: FactionTurnInfo
+from src.agegrid.ui.camera import (
+    CameraState,
+    apply_zoom as _apply_camera_zoom,
+    begin_pan as _begin_camera_pan,
+    board_origin_in_viewport as _board_origin_in_viewport,
+    clamp_camera_pan as _clamp_camera_pan,
+    end_pan as _end_camera_pan,
+    reset_camera_state as _reset_camera_state,
+    update_pan as _update_camera_pan,
+)
+from src.agegrid.ui.research_view import (
+    ResearchDrawHelpers,
+    available_research_ids as _available_research_ids,
+    clamp_tech_tree_view as _clamp_tech_tree_view,
+    draw_research_panel as _draw_research_panel,
+    draw_tech_tree_overlay as _draw_tech_tree_overlay,
+    research_panel_height as _research_panel_height,
+    tech_tree_layout as _tech_tree_layout,
+    tech_label as _tech_label,
+)
+from src.agegrid.ui.viewer_panels import (
+    PanelColors,
+    PanelDrawHelpers,
+    PanelText,
+    draw_hover_tile_panel as _draw_hover_tile_panel,
+    draw_human_action_panel as _draw_human_action_panel,
+    draw_selected_object_panel as _draw_selected_object_panel,
+    draw_selected_unit_panel as _draw_selected_unit_panel,
+    human_action_panel_height as _human_action_panel_height,
+    selected_base_lines as _selected_base_lines,
+    selected_building_lines as _selected_building_lines,
+    selected_resource_lines as _selected_resource_lines,
+)
+from src.agegrid.ui.turn_trace import (
+    FactionTurnInfo,
+    TurnSnapshot,
+    build_debug_snapshot,
+    build_turn_info,
+    step_faction_with_trace,
+    step_full_turn,
+    write_debug_snapshot,
+)
 
 
 @dataclass
@@ -73,17 +99,21 @@ GOLD_ACCENT = (210, 176, 104)
 GOLD_DIM = (148, 124, 72)
 
 # HUD layout constants
-HUD_H = 110           # height of the three top-bar panels
+HUD_H = 158           # height of the three top-bar panels
 HUD_INNER_PAD = 9     # inner padding inside each HUD panel
-HUD_FACTION_W = 210   # each faction bar width; may be capped to fit board width
+HUD_FACTION_W = 280   # each faction bar width; may be capped to fit board width
 
 # Text tones for drawing on top of parchment/asset panel backgrounds
-PARCH_TITLE = (80, 62, 46)    # main title on parchment
-PARCH_BODY = (92, 74, 52)     # body text on parchment
-PARCH_MUTED = (118, 97, 74)   # muted/secondary on parchment
+PARCH_TITLE = (68, 50, 34)    # main title on parchment
+PARCH_BODY = (82, 63, 42)     # body text on parchment
+PARCH_MUTED = (106, 84, 60)   # muted/secondary on parchment
 PARCH_SHADOW = (240, 224, 196)
 PARCH_ACCENT = (150, 120, 84)
 PARCH_LINE = (188, 168, 136)
+PARCH_GOOD = (72, 120, 70)
+PARCH_WARN = (170, 112, 48)
+PARCH_DANGER = (164, 76, 60)
+PARCH_INFO = (72, 106, 152)
 GRID_BG = (24, 30, 38)
 GRID_ALT = (28, 35, 43)
 GRID_LINE = (61, 72, 84)
@@ -104,62 +134,9 @@ HEX_HEIGHT = HEX_SIZE * 2
 MIN_ZOOM = 0.75
 MAX_ZOOM = 2.0
 ZOOM_STEP = 0.12
-
-TECH_ICON_STYLES = {
-    "mining": {"label": "M", "bg": (79, 121, 82), "fg": (232, 245, 220)},
-    "bronze": {"label": "B", "bg": (145, 103, 64), "fg": (247, 229, 202)},
-    "masonry": {"label": "S", "bg": (102, 108, 120), "fg": (236, 240, 246)},
-    "animal_husbandry": {"label": "A", "bg": (112, 94, 62), "fg": (246, 230, 205)},
-    "iron": {"label": "I", "bg": (95, 103, 112), "fg": (236, 239, 242)},
-    "fletching": {"label": "F", "bg": (72, 108, 134), "fg": (224, 238, 250)},
-    "construction": {"label": "C", "bg": (122, 112, 92), "fg": (244, 236, 220)},
-    "trade": {"label": "T", "bg": (94, 122, 88), "fg": (230, 243, 222)},
-    "horseback_riding": {"label": "H", "bg": (126, 90, 58), "fg": (246, 230, 205)},
-    "agriculture": {"label": "G", "bg": (102, 132, 74), "fg": (236, 244, 222)},
-    "steel": {"label": "S", "bg": (86, 94, 104), "fg": (236, 239, 242)},
-    "fortify": {"label": "F", "bg": (92, 98, 84), "fg": (238, 241, 228)},
-    "stirrups": {"label": "R", "bg": (108, 82, 58), "fg": (245, 232, 214)},
-    "engineering": {"label": "E", "bg": (84, 104, 128), "fg": (227, 238, 248)},
-    "precision": {"label": "P", "bg": (86, 114, 140), "fg": (229, 240, 250)},
-    "walls": {"label": "W", "bg": (118, 116, 106), "fg": (242, 240, 232)},
-    "infrastructure": {"label": "I", "bg": (120, 110, 88), "fg": (244, 236, 220)},
-    "markets": {"label": "M", "bg": (116, 96, 58), "fg": (248, 232, 204)},
-    "currency": {"label": "$", "bg": (140, 118, 64), "fg": (252, 242, 210)},
-    "logistics": {"label": "L", "bg": (96, 118, 136), "fg": (232, 242, 250)},
-    "stronghold": {"label": "H", "bg": (100, 88, 70), "fg": (246, 236, 224)},
-    "heavy_cavalry": {"label": "C", "bg": (118, 84, 68), "fg": (248, 232, 220)},
-    "advanced_siege": {"label": "A", "bg": (88, 102, 118), "fg": (236, 242, 248)},
-    "war_economy": {"label": "W", "bg": (122, 92, 70), "fg": (246, 234, 222)},
-}
-
-TECH_LABELS = {
-    "mining": "Mining",
-    "bronze": "Bronze",
-    "masonry": "Masonry",
-    "animal_husbandry": "Animal Husbandry",
-    "iron": "Iron",
-    "fletching": "Fletching",
-    "construction": "Construction",
-    "trade": "Trade",
-    "horseback_riding": "Horseback Riding",
-    "agriculture": "Agriculture",
-    "steel": "Steel",
-    "fortify": "Fortify",
-    "engineering": "Engineering",
-    "precision": "Precision",
-    "walls": "Walls",
-    "infrastructure": "Infrastructure",
-    "markets": "Markets",
-    "currency": "Currency",
-    "stirrups": "Stirrups",
-    "logistics": "Logistics",
-    "stronghold": "Stronghold",
-    "heavy_cavalry": "Heavy Cavalry",
-    "advanced_siege": "Advanced Siege",
-    "war_economy": "War Economy",
-}
-
-TECH_TREE_ORDER = list(tech.TECH_TREE_ORDER)
+DEFAULT_VIEWER_ZOOM = 1.2
+BOARD_VIEWPORT_EXTRA_W = 180
+BOARD_VIEWPORT_EXTRA_H = 96
 
 BUILDING_LABELS = {
     "storehouse": "Storehouse",
@@ -226,117 +203,8 @@ def _set_hex_zoom(zoom: float) -> float:
     HEX_HEIGHT = HEX_SIZE * 2
     return HEX_SIZE / BASE_HEX_SIZE
 
-
-def _tech_label(tech_id: str) -> str:
-    return TECH_LABELS.get(tech_id, tech_id.replace("_", " ").title())
-
-
 def _building_label(building_id: str) -> str:
     return BUILDING_LABELS.get(building_id, building_id.replace("_", " ").title())
-
-
-def _tech_unlock_summary(tech_id: str) -> str:
-    labels: list[str] = []
-    for item in tech.unlock_items(tech_id):
-        if item in TECH_LABELS:
-            labels.append(_tech_label(item))
-        elif item in BUILDING_LABELS:
-            labels.append(_building_label(item))
-        elif item in UNIT_LABELS:
-            labels.append(UNIT_LABELS[item])
-        else:
-            labels.append(item.replace("_", " ").title())
-    return ", ".join(labels) if labels else "-"
-
-
-def _tech_status(env: AgeGridEnv, faction: str, tech_id: str) -> str:
-    state = env.faction_state(faction)
-    if tech_id in state.techs_unlocked:
-        return "Done"
-    if state.tech_in_progress == tech_id:
-        return f"Active ({tech.research_turns_remaining(env, faction)}t)"
-    if tech.can_research(env, faction, tech_id):
-        return "Ready"
-    return "-"
-
-
-def _format_action(action: tuple | None) -> str:
-    if action is None:
-        return "stop"
-    kind = action[0]
-    if kind == "gather":
-        return f"gather worker#{action[1]}"
-    if kind == "move_towards":
-        return f"move unit#{action[1]} toward {action[2]}"
-    if kind == "spawn_worker":
-        return "spawn worker"
-    if kind == "train":
-        return f"train {action[1]}"
-    if kind == "build":
-        return f"build {action[2]} at {action[3]} with worker#{action[1]}"
-    if kind == "research":
-        return f"research {action[1]}"
-    if kind == "attack":
-        return f"attack unit#{action[2]} with unit#{action[1]}"
-    if kind == "attack_base":
-        return f"attack {action[2]} base with unit#{action[1]}"
-    if kind == "declare_war":
-        return f"declare war on {action[1]}"
-    if kind == "offer_peace":
-        return f"offer peace to {action[1]} for {action[2]}"
-    if kind == "accept_peace":
-        return f"accept peace with {action[1]}"
-    return str(action)
-
-
-def _build_turn_info(label: str, actions: list[tuple | None], log: list[str], events: list[str]) -> FactionTurnInfo:
-    research = next((_format_action(action) for action in actions if action and action[0] == "research"), "-")
-    attacks = next(
-        (_format_action(action) for action in actions if action and action[0] in {"attack", "attack_base"}),
-        "-",
-    )
-    return FactionTurnInfo(
-        label=label,
-        log=log,
-        last_action=events[-1] if events else (_format_action(actions[-1]) if actions else "stop"),
-        research=research,
-        attacks=attacks,
-    )
-
-
-def _step_faction_with_trace(env: AgeGridEnv, agent) -> tuple[FactionTurnInfo, list[tuple | None]]:
-    actions: list[tuple | None] = []
-
-    def decide(e: AgeGridEnv):
-        action = agent.act(e)
-        actions.append(action)
-        return action
-
-    faction = env.factions[env.current_player]
-    log = env.step_faction(decide)
-    return _build_turn_info(faction, actions, log, list(env.current_events)), actions
-
-
-def _step_full_turn(
-    env: AgeGridEnv,
-    red_agent,
-    blue_agent,
-) -> tuple[FactionTurnInfo, FactionTurnInfo, list[tuple | None], list[tuple | None]]:
-    red_info, red_actions = _step_faction_with_trace(env, red_agent)
-    env.step_end_turn()
-
-    if env.winner() is not None:
-        return (
-            red_info,
-            FactionTurnInfo("Blue", ["turn_skipped:winner"], last_action="-", research="-", attacks="-"),
-            red_actions,
-            [],
-        )
-
-    blue_info, blue_actions = _step_faction_with_trace(env, blue_agent)
-    env.step_end_turn()
-
-    return red_info, blue_info, red_actions, blue_actions
 
 
 def _is_human_agent_key(agent_key: str) -> bool:
@@ -535,74 +403,6 @@ def _human_research_options(env: AgeGridEnv, faction: str) -> tuple[str, list[tu
     return "Research", options, hint
 
 
-def _available_research_ids(env: AgeGridEnv, faction: str) -> list[str]:
-    return [tech_id for tech_id in TECH_TREE_ORDER if tech.can_research(env, faction, tech_id)]
-
-
-def _tech_detail_lines(env: AgeGridEnv, faction: str, tech_id: str) -> list[str]:
-    definition = tech.TECH_DEFS[tech_id]
-    state = env.faction_state(faction)
-    if tech_id in state.techs_unlocked:
-        status = "Unlocked"
-    elif state.tech_in_progress == tech_id:
-        status = f"In progress: {tech.research_turns_remaining(env, faction)} turns left"
-    elif tech.can_research(env, faction, tech_id):
-        status = "Available now"
-    else:
-        missing = [_tech_label(req) for req in definition.requires if req not in state.techs_unlocked]
-        status = f"Requires: {', '.join(missing)}" if missing else "Locked"
-    unlocks = _tech_unlock_summary(tech_id)
-    return [
-        definition.summary,
-        f"Cost: {definition.cost}",
-        f"Turns: {definition.turns}",
-        status,
-        f"Unlocks: {unlocks}",
-    ]
-
-
-def _draw_human_action_panel(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    rect: pygame.Rect,
-    title: str,
-    options: list[HumanActionOption],
-    hint: str | None,
-) -> list[tuple[pygame.Rect, object, bool]]:
-    inner = _draw_parchment_panel_frame(surface, board_assets, rect)
-    y = _draw_parchment_header(surface, title_font, body_font, inner, title)
-
-    button_rects: list[tuple[pygame.Rect, object, bool]] = []
-    columns = 2
-    button_w = (inner.width - 18) // columns
-    button_h = 30
-    for idx, option in enumerate(options):
-        col = idx % columns
-        row = idx // columns
-        button_rect = pygame.Rect(inner.x + 6 + col * (button_w + 6), y + row * (button_h + 8), button_w, button_h)
-        _draw_parchment_button(surface, body_font, board_assets, button_rect, option.label, active=option.active, enabled=option.enabled)
-        button_rects.append((button_rect, option.payload, option.enabled))
-
-    if hint:
-        hint_y = y + ((len(options) + 1) // columns) * (button_h + 8) + 4
-        wrapped = _wrap_lines(hint, body_font, inner.width - 12)
-        _draw_text_block(surface, body_font, wrapped, inner.x + 6, hint_y, PARCH_MUTED, 18)
-
-    return button_rects
-
-
-def _human_action_panel_height(body_font: pygame.font.Font, options: list[HumanActionOption], hint: str | None) -> int:
-    columns = 2
-    button_h = 30
-    rows = (len(options) + columns - 1) // columns
-    height = 74 + rows * (button_h + 8)
-    if hint:
-        height += len(_wrap_lines(hint, body_font, 252)) * 16 + 8
-    return max(106, height)
-
-
 def _advance_until_human_or_end(
     env: AgeGridEnv,
     red_agent,
@@ -621,7 +421,7 @@ def _advance_until_human_or_end(
             break
 
         agent = red_agent if current_faction == "Red" else blue_agent
-        info, actions = _step_faction_with_trace(env, agent)
+        info, actions = step_faction_with_trace(env, agent)
         effects.extend(_effects_from_actions(env, actions, current_faction))
 
         if current_faction == "Red":
@@ -634,6 +434,28 @@ def _advance_until_human_or_end(
             completed_rounds.append(TurnSnapshot(env.turn, red_info, blue_info))
 
     return red_info, blue_info, completed_rounds, effects
+
+
+def _step_ai_faction(
+    env: AgeGridEnv,
+    red_agent,
+    blue_agent,
+    red_info: FactionTurnInfo,
+    blue_info: FactionTurnInfo,
+) -> tuple[FactionTurnInfo, FactionTurnInfo, TurnSnapshot | None, list[VisualEffect]]:
+    """Run exactly one AI faction's turn and end it. Returns updated infos, an optional
+    completed-round snapshot (when the round boundary is crossed), and visual effects."""
+    faction = env.factions[env.current_player]
+    agent = red_agent if faction == "Red" else blue_agent
+    info, actions = step_faction_with_trace(env, agent)
+    effects = _effects_from_actions(env, actions, faction)
+    if faction == "Red":
+        red_info = info
+    else:
+        blue_info = info
+    env.step_end_turn()
+    snapshot = TurnSnapshot(env.turn, red_info, blue_info) if env.current_player == 0 else None
+    return red_info, blue_info, snapshot, effects
 
 
 def _wrap_lines(text: str, font: pygame.font.Font, width: int) -> list[str]:
@@ -724,6 +546,48 @@ def _draw_panel(
     pygame.draw.rect(surface, border, rect, width=2, border_radius=radius)
 
 
+def _relation_color(relation: str) -> tuple[int, int, int]:
+    lowered = relation.lower()
+    if lowered == "peace":
+        return PARCH_GOOD
+    if lowered == "war":
+        return PARCH_DANGER
+    if lowered == "truce":
+        return PARCH_WARN
+    return PARCH_MUTED
+
+
+def _income_color(income: int) -> tuple[int, int, int]:
+    if income > 0:
+        return PARCH_GOOD
+    if income < 0:
+        return PARCH_DANGER
+    return PARCH_MUTED
+
+
+def _base_hp_color(base_hp: int, max_base_hp: int) -> tuple[int, int, int]:
+    if max_base_hp <= 0:
+        return (175, 50, 45)
+    ratio = base_hp / max_base_hp
+    if ratio <= 0.33:
+        return (175, 50, 45)   # vivid red
+    if ratio <= 0.66:
+        return (190, 120, 30)  # vivid amber
+    return (45, 145, 45)       # vivid green
+
+
+def _era_color(era: str) -> tuple[int, int, int]:
+    if "Engineering" in era:
+        return GOLD_ACCENT             # golden
+    if "Iron" in era:
+        return (145, 155, 168)         # steel grey
+    if "Bronze" in era:
+        return (185, 118, 52)          # bronze
+    if "Stone" in era:
+        return (140, 125, 110)         # grey-brown
+    return (180, 160, 130)             # founding tan
+
+
 def _draw_faction_bar(
     surface: pygame.Surface,
     body_font: pygame.font.Font,
@@ -733,12 +597,13 @@ def _draw_faction_bar(
     faction: str,
     agent_label: str,
     bank: int,
-    workers: int,
-    military: int,
+    income: int,
+    army_summary: str,
     base_hp: int,
     max_base_hp: int,
     era: str,
-    stance: str,
+    relation: str,
+    research_label: str,
     accent: tuple[int, int, int],
 ) -> None:
     """Slim faction summary bar for the top HUD (Red left, Blue right)."""
@@ -755,20 +620,20 @@ def _draw_faction_bar(
     y = rect.y + HUD_INNER_PAD + 4
 
     # Row 1: faction name + era (right-aligned)
-    _draw_shadow_text(surface, body_font, faction, ix, y, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
+    _draw_shadow_text(surface, body_font, faction, ix, y, accent, shadow=PARCH_SHADOW, shadow_offset=1)
     era_w = small_font.size(era)[0]
-    _draw_shadow_text(surface, small_font, era, rect.right - era_w - HUD_INNER_PAD, y + 3, TEXT_SECONDARY, shadow=(10, 12, 16), shadow_offset=1)
-    y += body_font.get_height() + 5
+    _draw_shadow_text(surface, small_font, era, rect.right - era_w - HUD_INNER_PAD, y + 3, _era_color(era), shadow=PARCH_SHADOW, shadow_offset=1)
+    y += body_font.get_height() + 6
 
-    # Row 2: three stat chips  [$]  [W]  [M]
+    # Row 2: economy / diplomacy / army
     stat_items = [
         (f"$ {bank}", PARCH_TITLE),
-        (f"W {workers}  M {military}", PARCH_BODY),
-        (stance, PARCH_MUTED),
+        (f"{income:+}/turn", _income_color(income)),
+        (relation, _relation_color(relation)),
     ]
     chip_gap = 4
     chip_w = (iw - chip_gap * 2) // 3
-    chip_h = 26
+    chip_h = 28
     inset_sprite = board_assets.ui_sprite("panelInset_beigeLight") or board_assets.ui_sprite("panelInset_beige")
     for i, (text, text_color) in enumerate(stat_items):
         chip_rect = pygame.Rect(ix + i * (chip_w + chip_gap), y, chip_w, chip_h)
@@ -777,18 +642,66 @@ def _draw_faction_bar(
             pygame.draw.rect(surface, PANEL_SOFT, chip_rect, width=1, border_radius=6)
         label = _fit_text(text, small_font, chip_w - 8)
         tx = chip_rect.centerx - small_font.size(label)[0] // 2
-        _draw_shadow_text(surface, small_font, label, tx, chip_rect.y + 5, text_color, shadow=PARCH_SHADOW, shadow_offset=0)
+        _draw_shadow_text(surface, small_font, label, tx, chip_rect.y + 6, text_color, shadow=PARCH_SHADOW, shadow_offset=1)
     y += chip_h + 6
 
-    # Row 3: base HP bar
+    # Row 3: research + army summary
+    research_text = _fit_text(f"Research {research_label}", small_font, iw)
+    _draw_shadow_text(surface, small_font, research_text, ix, y, PARCH_INFO, shadow=PARCH_SHADOW, shadow_offset=1)
+    y += small_font.get_height() + 3
+    army_text = _fit_text(f"Army {army_summary}", small_font, iw)
+    _draw_shadow_text(surface, small_font, army_text, ix, y, (90, 138, 68), shadow=PARCH_SHADOW, shadow_offset=1)
+    y += small_font.get_height() + 6
+
+    # Row 4: base HP bar
     hp_text = f"Base {base_hp}/{max_base_hp}"
-    _draw_shadow_text(surface, small_font, hp_text, ix, y + 2, TEXT_SECONDARY, shadow=(10, 12, 16), shadow_offset=1)
+    hp_color = _base_hp_color(base_hp, max_base_hp)
+    _draw_shadow_text(surface, small_font, hp_text, ix, y + 1, hp_color, shadow=PARCH_SHADOW, shadow_offset=1)
     bar_x = ix + small_font.size(hp_text)[0] + 6
     bar_w = rect.right - HUD_INNER_PAD - bar_x
     if bar_w > 16:
-        bar_rect = pygame.Rect(bar_x, y + 4, bar_w, 14)
+        bar_rect = pygame.Rect(bar_x, y + 3, bar_w, 15)
         color_family = "blue" if faction == "Blue" else "red"
         _draw_ui_meter(surface, board_assets, bar_rect, base_hp, max_base_hp, color_family)
+
+
+def _faction_income(env: AgeGridEnv, faction: str) -> int:
+    total = 0
+    for structure in env.get_buildings_for_faction(faction):
+        spec = production.building_stats(env, faction, structure.building_type)
+        if spec is not None:
+            total += spec.resource_income
+    return total
+
+
+def _faction_army_summary(env: AgeGridEnv, faction: str) -> str:
+    composition = unit_composition(env, faction)
+    total = composition["soldier"] + composition["archer"] + composition["horseman"]
+    return f"{total}  S{composition['soldier']} A{composition['archer']} H{composition['horseman']}"
+
+
+def _draw_center_hud_idle(
+    surface: pygame.Surface,
+    small_font: pygame.font.Font,
+    env: AgeGridEnv,
+    ix: int,
+    y: int,
+    width: int,
+    human_turn_active: bool,
+    current_faction: str,
+) -> None:
+    """Idle (nothing selected) middle section for the center HUD."""
+    if human_turn_active:
+        budget = f"Atk left: {env.actions_left}   Att left: {env.attempts_left}"
+        _draw_shadow_text(surface, small_font, budget, ix, y, PARCH_BODY, shadow=PARCH_SHADOW, shadow_offset=1)
+        y += small_font.get_height() + 3
+    income = _faction_income(env, current_faction)
+    army = _faction_army_summary(env, current_faction)
+    summary = _fit_text(f"Income {income:+}/turn   Army: {army}", small_font, width)
+    _draw_shadow_text(surface, small_font, summary, ix, y, _income_color(income), shadow=PARCH_SHADOW, shadow_offset=1)
+    y += small_font.get_height() + 3
+    year_text = _fit_text(f"Year {env.formatted_year()}   {env.current_era()}", small_font, width)
+    _draw_shadow_text(surface, small_font, year_text, ix, y, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=1)
 
 
 def _draw_center_hud(
@@ -798,68 +711,169 @@ def _draw_center_hud(
     small_font: pygame.font.Font,
     board_assets: BoardAssets,
     rect: pygame.Rect,
-    btn_rect: pygame.Rect,
     env: AgeGridEnv,
     winner: str | None,
     human_turn_active: bool,
     btn_label: str,
     current_faction: str,
-) -> None:
-    """Central top-HUD zone: turn info, round flow, action budget, end-turn button."""
+    selected_unit=None,
+    selected_tile: tuple[int, int] | None = None,
+    ai_vs_ai: bool = False,
+) -> tuple[pygame.Rect, pygame.Rect]:
+    """Context-sensitive center HUD: turn header, selection details, recent event.
+
+    Returns (next_turn_btn_rect, next_faction_btn_rect). next_faction_btn_rect is a
+    zero-size rect when not in AI-vs-AI mode.
+    """
     panel_key = "panel_beigeLight"
     if not _draw_scaled_sprite(surface, board_assets.ui_sprite(panel_key), rect):
         _draw_panel(surface, rect, fill=(20, 27, 36), border=PANEL_SOFT, radius=12)
 
     ix = rect.x + HUD_INNER_PAD
+    iw = rect.width - HUD_INNER_PAD * 2
     y = rect.y + HUD_INNER_PAD
 
-    # Left: "TURN" label + big number  |  Right: button (drawn at btn_rect, pre-computed)
-    label_turn = "TURN"
-    lw = small_font.size(label_turn)[0]
-    turn_str = str(env.turn)
-    _draw_shadow_text(surface, small_font, label_turn, ix, y + 6, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
-    _draw_shadow_text(surface, title_font, turn_str, ix + lw + 6, y, GOLD_ACCENT, shadow=PARCH_SHADOW, shadow_offset=0)
-    y += title_font.get_height() + 4
-
-    # Row 2: flow arrow (left-aligned) + action budget
-    if winner is not None:
-        result_text = f"{winner} wins!"
-        _draw_shadow_text(surface, body_font, result_text, ix, y, GOLD_ACCENT, shadow=PARCH_SHADOW, shadow_offset=0)
-    else:
-        flow_color = (180, 90, 84) if current_faction == "Red" else (88, 126, 212)
-        other = "Blue" if current_faction == "Red" else "Red"
-        arrow = f"{current_faction}  \u2192  {other}"
-        _draw_shadow_text(surface, body_font, arrow, ix, y, flow_color, shadow=PARCH_SHADOW, shadow_offset=0)
-        if human_turn_active:
-            y += body_font.get_height() + 2
-            budget = f"Atk {env.actions_left}  Att {env.attempts_left}"
-            _draw_shadow_text(surface, small_font, budget, ix, y, PARCH_BODY, shadow=PARCH_SHADOW, shadow_offset=0)
-
-    # End-turn / Next-turn button (uses blue button asset)
+    # ── Row 1: turn label + faction + Next Turn button (top-right) ─────────
+    btn_w, btn_h = 110, 30
+    btn_rect = pygame.Rect(rect.right - HUD_INNER_PAD - btn_w, rect.y + HUD_INNER_PAD + 1, btn_w, btn_h)
     btn_fill = (52, 82, 124) if winner is None else (58, 62, 68)
     btn_border = (120, 172, 234) if winner is None else (90, 96, 108)
     btn_sprite_key = "button_blue" if winner is None else "button_grey"
     if not _draw_scaled_sprite(surface, board_assets.ui_sprite(btn_sprite_key), btn_rect):
         _draw_panel(surface, btn_rect, fill=btn_fill, border=btn_border, radius=10)
-    display_label = btn_label if winner is None else "Game Over"
+    btn_display = btn_label if winner is None else "Game Over"
     _draw_shadow_text(
-        surface,
-        small_font,
-        display_label,
-        btn_rect.centerx - small_font.size(display_label)[0] // 2,
+        surface, small_font, btn_display,
+        btn_rect.centerx - small_font.size(btn_display)[0] // 2,
         btn_rect.y + (btn_rect.height - small_font.get_height()) // 2,
         PARCH_TITLE if winner is None else PARCH_MUTED,
-        shadow=PARCH_SHADOW,
-        shadow_offset=0,
+        shadow=PARCH_SHADOW, shadow_offset=1,
     )
+
+    if winner is not None:
+        _draw_shadow_text(surface, body_font, f"{winner} wins!", ix, y + 4, GOLD_ACCENT, shadow=PARCH_SHADOW, shadow_offset=1)
+    else:
+        faction_color = RED_PRIMARY if current_faction == "Red" else BLUE_PRIMARY
+        turn_part = f"TURN {env.turn}"
+        _draw_shadow_text(surface, body_font, turn_part, ix, y + 2, GOLD_ACCENT, shadow=PARCH_SHADOW, shadow_offset=1)
+        sep_x = ix + body_font.size(turn_part)[0] + 8
+        _draw_shadow_text(surface, body_font, "\u2014", sep_x, y + 2, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
+        faction_x = sep_x + body_font.size("\u2014 ")[0] + 2
+        faction_text = _fit_text(f"{current_faction} TURN", body_font, btn_rect.left - 8 - faction_x)
+        _draw_shadow_text(surface, body_font, faction_text, faction_x, y + 2, faction_color, shadow=PARCH_SHADOW, shadow_offset=1)
+
+    y += body_font.get_height() + 6
+    pygame.draw.line(surface, PARCH_LINE, (ix, y), (rect.right - HUD_INNER_PAD, y), 1)
+    y += 7
+
+    # ── Next Faction button (AI-vs-AI only, right column below divider) ─────
+    nf_btn_rect = pygame.Rect(0, 0, 0, 0)
+    if ai_vs_ai and winner is None:
+        nf_btn_w, nf_btn_h = 106, 26
+        nf_btn_rect = pygame.Rect(rect.right - HUD_INNER_PAD - nf_btn_w, y + 2, nf_btn_w, nf_btn_h)
+        nf_sprite = board_assets.ui_sprite("button")
+        if not _draw_scaled_sprite(surface, nf_sprite, nf_btn_rect):
+            _draw_panel(surface, nf_btn_rect, fill=(68, 86, 58), border=(112, 148, 86), radius=10)
+        nf_label = "Next Faction"
+        _draw_shadow_text(
+            surface, small_font, nf_label,
+            nf_btn_rect.centerx - small_font.size(nf_label)[0] // 2,
+            nf_btn_rect.y + (nf_btn_rect.height - small_font.get_height()) // 2,
+            PARCH_TITLE,
+            shadow=PARCH_SHADOW, shadow_offset=1,
+        )
+        # hint: Tab keybind
+        hint_text = "Tab"
+        _draw_shadow_text(surface, small_font, hint_text, nf_btn_rect.right + 4, nf_btn_rect.y + (nf_btn_rect.height - small_font.get_height()) // 2, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
+
+    # ── Middle: context-sensitive content ───────────────────────────────────
+    mid_right = (nf_btn_rect.left - 8) if nf_btn_rect.width > 0 else (rect.right - HUD_INNER_PAD)
+    mid_w = mid_right - ix
+
+    if selected_unit is not None:
+        spec = production.unit_stats(env, selected_unit.faction, selected_unit.unit_type)
+        max_hp = spec.hp if spec is not None else selected_unit.hp
+        acc = RED_PRIMARY if selected_unit.faction == "Red" else BLUE_PRIMARY
+        unit_label = UNIT_LABELS.get(selected_unit.unit_type, selected_unit.unit_type.replace("_", " ").title())
+        _draw_shadow_text(surface, body_font, _fit_text(f"{unit_label}  \u2014  {selected_unit.faction} #{selected_unit.id}", body_font, mid_w), ix, y, acc, shadow=PARCH_SHADOW, shadow_offset=1)
+        y += body_font.get_height() + 3
+        hp_text = f"HP {selected_unit.hp}/{max_hp}"
+        _draw_shadow_text(surface, small_font, hp_text, ix, y + 1, _base_hp_color(selected_unit.hp, max_hp), shadow=PARCH_SHADOW, shadow_offset=1)
+        bar_x = ix + small_font.size(hp_text)[0] + 7
+        bar_w = min(110, mid_right - bar_x)
+        if bar_w > 20:
+            _draw_ui_meter(surface, board_assets, pygame.Rect(bar_x, y + 2, bar_w, 14), selected_unit.hp, max_hp, "blue" if selected_unit.faction == "Blue" else "red")
+        y += small_font.get_height() + 4
+        atk = spec.attack_damage if spec else selected_unit.attack_damage
+        rng = spec.attack_range if spec else selected_unit.attack_range
+        mv = spec.move_steps if spec else selected_unit.move_steps
+        _draw_shadow_text(surface, small_font, f"ATK {atk}   RNG {rng}   MOVE {mv}", ix, y, PARCH_BODY, shadow=PARCH_SHADOW, shadow_offset=1)
+
+    elif selected_tile is not None:
+        sel_base_entry = next(((f, b) for f, b in env.bases.items() if b.position == selected_tile), None)
+        sel_building = next((b for b in env.buildings if b.position == selected_tile), None)
+        if sel_base_entry is not None:
+            faction_name, sel_base = sel_base_entry
+            acc = RED_PRIMARY if faction_name == "Red" else BLUE_PRIMARY
+            max_hp = env.base_max_hp(faction_name)
+            _draw_shadow_text(surface, body_font, f"{faction_name} Base", ix, y, acc, shadow=PARCH_SHADOW, shadow_offset=1)
+            y += body_font.get_height() + 3
+            hp_text = f"HP {sel_base.hp}/{max_hp}"
+            _draw_shadow_text(surface, small_font, hp_text, ix, y + 1, _base_hp_color(sel_base.hp, max_hp), shadow=PARCH_SHADOW, shadow_offset=1)
+            bar_x = ix + small_font.size(hp_text)[0] + 7
+            bar_w = min(110, mid_right - bar_x)
+            if bar_w > 20:
+                _draw_ui_meter(surface, board_assets, pygame.Rect(bar_x, y + 2, bar_w, 14), sel_base.hp, max_hp, "blue" if faction_name == "Blue" else "red")
+            y += small_font.get_height() + 4
+            _draw_shadow_text(surface, small_font, "Primary stronghold. Protect at all costs.", ix, y, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=1)
+        elif sel_building is not None:
+            acc = RED_PRIMARY if sel_building.faction == "Red" else BLUE_PRIMARY
+            bspec = production.building_stats(env, sel_building.faction, sel_building.building_type)
+            max_hp = bspec.hp if bspec is not None else sel_building.hp
+            blabel = _building_label(sel_building.building_type)
+            _draw_shadow_text(surface, body_font, _fit_text(f"{blabel}  \u2014  {sel_building.faction}", body_font, mid_w), ix, y, acc, shadow=PARCH_SHADOW, shadow_offset=1)
+            y += body_font.get_height() + 3
+            hp_text = f"HP {sel_building.hp}/{max_hp}"
+            _draw_shadow_text(surface, small_font, hp_text, ix, y + 1, _base_hp_color(sel_building.hp, max_hp), shadow=PARCH_SHADOW, shadow_offset=1)
+            bar_x = ix + small_font.size(hp_text)[0] + 7
+            bar_w = min(110, mid_right - bar_x)
+            if bar_w > 20:
+                _draw_ui_meter(surface, board_assets, pygame.Rect(bar_x, y + 2, bar_w, 14), sel_building.hp, max_hp, "blue" if sel_building.faction == "Blue" else "red")
+            if bspec is not None and bspec.resource_income > 0:
+                y += small_font.get_height() + 4
+                _draw_shadow_text(surface, small_font, f"Income +{bspec.resource_income}/turn", ix, y, PARCH_GOOD, shadow=PARCH_SHADOW, shadow_offset=1)
+        else:
+            _draw_center_hud_idle(surface, small_font, env, ix, y, mid_w, human_turn_active, current_faction)
+    else:
+        _draw_center_hud_idle(surface, small_font, env, ix, y, mid_w, human_turn_active, current_faction)
+
+    # ── Bottom: most recent event ───────────────────────────────────────────
+    if env.recent_events:
+        event_y = rect.bottom - small_font.get_height() - 7
+        pygame.draw.line(surface, PARCH_LINE, (ix, event_y - 5), (rect.right - HUD_INNER_PAD, event_y - 5), 1)
+        recent = env.recent_events[-1]
+        _draw_shadow_text(surface, small_font, _fit_text(recent, small_font, iw), ix, event_y, _event_color(recent), shadow=PARCH_SHADOW, shadow_offset=1)
+
+    return btn_rect, nf_btn_rect
 
 
 def _event_color(line: str) -> tuple[int, int, int]:
     if line.startswith("Red "):
-        return (244, 184, 180)
+        return (198, 92, 78)
     if line.startswith("Blue "):
-        return (176, 214, 255)
-    return (214, 220, 226)
+        return (82, 118, 188)
+    return PARCH_BODY
+
+
+def _faction_research_label(env: AgeGridEnv, faction: str) -> str:
+    state = env.faction_state(faction)
+    if state.tech_in_progress:
+        turns_left = tech.research_turns_remaining(env, faction)
+        return f"{_tech_label(state.tech_in_progress)} ({turns_left}t)"
+    available = _available_research_ids(env, faction)
+    if available:
+        return f"Ready: {_tech_label(available[0])}"
+    return "None"
 
 
 def _draw_event_panel(
@@ -894,85 +908,6 @@ def _draw_event_panel(
         cursor += block_h
 
 
-def _draw_research_panel(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    env: AgeGridEnv,
-    rect: pygame.Rect,
-) -> None:
-    inner = _draw_parchment_panel_frame(surface, board_assets, rect)
-    y = _draw_parchment_header(surface, title_font, body_font, inner, "Research")
-    max_width = inner.width - 16
-    for faction, color in (("Red", (244, 184, 180)), ("Blue", (176, 214, 255))):
-        state = env.faction_state(faction)
-        available = [
-            tech_id
-            for tech_id in tech.TECH_DEFS
-            if tech.can_research(env, faction, tech_id)
-        ]
-        available_labels = [_tech_label(tech_id) for tech_id in available]
-        if state.tech_in_progress:
-            turns_left = tech.research_turns_remaining(env, faction)
-            current_definition = tech.TECH_DEFS[state.tech_in_progress]
-            total_turns = current_definition.turns
-            progress_ratio = min(1.0, state.research_points / total_turns) if total_turns > 0 else 1.0
-            status = _tech_label(state.tech_in_progress)
-            eta = f"{turns_left} turn{'s' if turns_left != 1 else ''} left"
-            summary = current_definition.summary
-        else:
-            progress_ratio = 0.0
-            status = "None"
-            eta = None
-            summary = tech.TECH_DEFS[available[0]].summary if available else "No research currently available."
-        icon_key = state.tech_in_progress or (available[0] if available else None)
-        icon_style = TECH_ICON_STYLES.get(icon_key or "", {"label": "?", "bg": (70, 76, 84), "fg": (232, 236, 240)})
-        subsection_h = _research_subsection_height(body_font, faction, status, eta, summary, available_labels, max_width)
-        subsection_rect = pygame.Rect(inner.x + 8, y, inner.width - 16, subsection_h)
-        inset_sprite = board_assets.ui_sprite("panelInset_beigeLight") or board_assets.ui_sprite("panelInset_beige")
-        if not _draw_scaled_sprite(surface, inset_sprite, subsection_rect):
-            pygame.draw.rect(surface, PANEL_INSET, subsection_rect, border_radius=8)
-            pygame.draw.rect(surface, PANEL_SOFT, subsection_rect, width=1, border_radius=8)
-
-        inner_x = subsection_rect.x + 10
-        inner_y = subsection_rect.y + 10
-        inner_width = subsection_rect.width - 20
-        icon_rect = pygame.Rect(inner_x, inner_y, 24, 24)
-        pygame.draw.rect(surface, icon_style["bg"], icon_rect, border_radius=6)
-        pygame.draw.rect(surface, (236, 240, 244), icon_rect, width=1, border_radius=6)
-        _draw_shadow_text(
-            surface,
-            body_font,
-            icon_style["label"],
-            icon_rect.x + 6,
-            icon_rect.y + 2,
-            icon_style["fg"],
-            shadow=(18, 22, 28),
-            shadow_offset=1,
-        )
-        header_lines = _wrap_lines(f"{faction}: {status}", body_font, inner_width - 30)
-        _draw_text_block(surface, body_font, header_lines, inner_x + 32, inner_y, color, 19)
-        content_y = inner_y + max(26, len(header_lines) * 19) + 8
-
-        detail_lines = [summary, f"Next: {', '.join(available_labels[:3]) if available_labels else '-'}"]
-        if eta:
-            detail_lines.insert(0, eta)
-        for line in detail_lines:
-            wrapped = _wrap_lines(line, body_font, inner_width)
-            _draw_text_block(surface, body_font, wrapped, inner_x, content_y, PARCH_BODY, 19)
-            content_y += len(wrapped) * 19
-            content_y += 5
-        bar_rect = pygame.Rect(inner_x, content_y + 6, inner_width, 12)
-        pygame.draw.rect(surface, (155, 129, 89), bar_rect, border_radius=5)
-        if progress_ratio > 0:
-            fill_width = max(8, int(bar_rect.width * progress_ratio))
-            fill_rect = pygame.Rect(bar_rect.x, bar_rect.y, min(fill_width, bar_rect.width), bar_rect.height)
-            pygame.draw.rect(surface, color, fill_rect, border_radius=5)
-        pygame.draw.rect(surface, (124, 98, 65), bar_rect, width=1, border_radius=5)
-        y = subsection_rect.bottom + 12
-
-
 def _draw_status_badge(
     surface: pygame.Surface,
     font: pygame.font.Font,
@@ -987,65 +922,6 @@ def _draw_status_badge(
     pygame.draw.rect(surface, fill, badge, border_radius=10)
     pygame.draw.rect(surface, border, badge, width=1, border_radius=10)
     _draw_shadow_text(surface, font, text, badge.x + 10, badge.y + 3, text_color, shadow=(14, 16, 20), shadow_offset=1)
-
-
-def _research_panel_height(
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    env: AgeGridEnv,
-    width: int,
-) -> int:
-    # 18 = outer padding (inflate -18,-18 adds 9 each side); header = 22 + title_font height
-    header_h = 22 + title_font.get_height()
-    total = 18 + header_h
-    subsection_width = width - 34  # inner.width - 16, where inner = outer.inflate(-18,-18)
-    for faction in ("Red", "Blue"):
-        state = env.faction_state(faction)
-        available = [
-            tech_id
-            for tech_id in tech.TECH_DEFS
-            if tech.can_research(env, faction, tech_id)
-        ]
-        available_labels = [_tech_label(tech_id) for tech_id in available]
-        if state.tech_in_progress:
-            turns_left = tech.research_turns_remaining(env, faction)
-            current_def = tech.TECH_DEFS[state.tech_in_progress]
-            status = _tech_label(state.tech_in_progress)
-            eta = f"{turns_left} turn{'s' if turns_left != 1 else ''} left"
-            summary = current_def.summary
-        else:
-            status = "None"
-            eta = None
-            summary = tech.TECH_DEFS[available[0]].summary if available else "No research currently available."
-        total += _research_subsection_height(body_font, faction, status, eta, summary, available_labels, subsection_width)
-        total += 12
-    return total
-
-
-def _research_subsection_height(
-    body_font: pygame.font.Font,
-    faction: str,
-    status: str,
-    eta: str | None,
-    summary: str,
-    available_labels: list[str],
-    width: int,
-) -> int:
-    # Mirror _draw_research_panel exactly:
-    # inner_width = subsection.width - 20
-    inner_width = width - 20
-    header_lines = _wrap_lines(f"{faction}: {status}", body_font, inner_width - 30)
-    # 10 top-pad + header zone + 8 gap after header
-    total = 10 + max(26, len(header_lines) * 19) + 8
-    # detail blocks: [eta (opt), summary, "Next: ..."], each adds lines*19 + 5
-    detail = [summary, f"Next: {', '.join(available_labels[:3]) if available_labels else '-'}"]
-    if eta:
-        detail.insert(0, eta)
-    for line in detail:
-        total += len(_wrap_lines(line, body_font, inner_width)) * 19 + 5
-    # gap + progress bar + bottom padding
-    total += 6 + 12 + 10
-    return total
 
 
 def _tactical_panel_lines(env: AgeGridEnv, faction: str) -> list[str]:
@@ -1098,7 +974,17 @@ def _draw_tactical_panel(
         line_y = block_rect.y + 28
         for line in _tactical_panel_lines(env, faction):
             wrapped = _wrap_lines(line, body_font, block_rect.width - 20)
-            _draw_text_block(surface, body_font, wrapped, block_rect.x + 10, line_y, PARCH_BODY, 18)
+            line_color = PARCH_BODY
+            if line.startswith("Diplomacy "):
+                line_color = _relation_color(line.removeprefix("Diplomacy ").strip())
+            elif line.startswith("Threat "):
+                threat_text = line.removeprefix("Threat ").strip().lower()
+                line_color = PARCH_DANGER if threat_text == "emergency" else PARCH_WARN if threat_text == "rising" else PARCH_BODY
+            elif line.startswith("Plan "):
+                line_color = PARCH_INFO
+            elif line.startswith("Army "):
+                line_color = PARCH_MUTED
+            _draw_text_block(surface, body_font, wrapped, block_rect.x + 10, line_y, line_color, 18)
             line_y += len(wrapped) * 18
         y = block_rect.bottom + 10
 
@@ -1290,177 +1176,6 @@ def _draw_ui_meter(
         pygame.draw.rect(surface, fill_color, fill_rect, border_radius=8)
 
 
-def _selected_unit_lines(env: AgeGridEnv, unit) -> list[str]:
-    spec = production.unit_stats(env, unit.faction, unit.unit_type)
-    label = UNIT_LABELS.get(unit.unit_type, unit.unit_type.replace("_", " ").title())
-    description = UNIT_HELP.get(unit.unit_type, "Military unit.")
-    if spec is None:
-        return [label, description]
-    return [
-        label,
-        description,
-        f"Position {unit.position[0]}, {unit.position[1]}",
-    ]
-
-
-def _selected_resource_lines(resource) -> list[str]:
-    label = RESOURCE_LABELS.get(resource.resource_type, resource.resource_type.replace("_", " ").title())
-    help_text = RESOURCE_HELP.get(resource.resource_type, "Strategic resource node.")
-    extra = "Visible once its required tech is unlocked." if resource.required_tech else "Available to gather immediately."
-    return [
-        label,
-        help_text,
-        extra,
-        f"Remaining {resource.remaining}",
-    ]
-
-
-def _selected_building_lines(env: AgeGridEnv, building) -> list[str]:
-    label = _building_label(building.building_type)
-    help_text = BUILDING_HELP.get(building.building_type, "Faction structure.")
-    spec = production.building_stats(env, building.faction, building.building_type)
-    extras: list[str] = [help_text]
-    if spec is not None and spec.resource_income > 0:
-        extras.append(f"Income +{spec.resource_income} each turn")
-    if spec is not None and spec.attack_damage > 0:
-        extras.append(f"Attack {spec.attack_damage}  Range {spec.attack_range}")
-    extras.append(f"Position {building.position[0]}, {building.position[1]}")
-    return [label, *extras]
-
-
-def _selected_base_lines(base, faction: str) -> list[str]:
-    return [
-        f"{faction} Base",
-        "Primary stronghold. Lose this and the match is over.",
-        f"Position {base.position[0]}, {base.position[1]}",
-    ]
-
-
-def _draw_selected_unit_panel(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    small_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    env: AgeGridEnv,
-    unit,
-    rect: pygame.Rect,
-) -> pygame.Rect:
-    accent = RED_PRIMARY if unit.faction == "Red" else BLUE_PRIMARY
-    inner = _draw_parchment_panel_frame(surface, board_assets, rect)
-
-    close_rect = _draw_parchment_close_button(surface, board_assets, pygame.Rect(inner.right - 26, inner.y + 6, 22, 22))
-
-    icon_center = (inner.x + 38, inner.y + 38)
-    pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
-    if not _draw_unit_sprite(
-        surface,
-        board_assets,
-        env,
-        unit,
-        icon_center,
-        RED_ACCENT if unit.faction == "Red" else BLUE_ACCENT,
-        accent,
-        size=34,
-    ):
-        _draw_unit_icon(surface, unit, icon_center, RED_ACCENT if unit.faction == "Red" else BLUE_ACCENT, accent)
-
-    unit_name = UNIT_LABELS.get(unit.unit_type, unit.unit_type.replace("_", " ").title())
-    _draw_shadow_text(surface, title_font, unit_name, inner.x + 72, inner.y + 10, PARCH_TITLE, shadow=PARCH_SHADOW, shadow_offset=0)
-    _draw_shadow_text(
-        surface,
-        body_font,
-        f"{unit.faction} #{unit.id}",
-        inner.x + 72,
-        inner.y + 36,
-        accent,
-        shadow=PARCH_SHADOW,
-        shadow_offset=0,
-    )
-    pygame.draw.line(surface, PARCH_LINE, (inner.x + 12, inner.y + 64), (inner.right - 12, inner.y + 64), 1)
-
-    spec = production.unit_stats(env, unit.faction, unit.unit_type)
-    max_hp = spec.hp if spec is not None else unit.hp
-    health_rect = pygame.Rect(inner.x + 14, inner.y + 84, inner.width - 28, 24)
-    _draw_shadow_text(surface, body_font, f"Health {unit.hp}/{max_hp}", health_rect.x, health_rect.y - 18, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
-    _draw_ui_meter(surface, board_assets, health_rect, unit.hp, max_hp, color_family="red")
-
-    stat_y = health_rect.bottom + 20
-    attack = spec.attack_damage if spec is not None else unit.attack_damage
-    attack_range = spec.attack_range if spec is not None else unit.attack_range
-    move_steps = spec.move_steps if spec is not None else unit.move_steps
-    stats = [
-        ("Attack", str(attack), (238, 163, 92)),
-        ("Range", str(attack_range), (129, 190, 228)),
-        ("Move", str(move_steps), (165, 213, 122)),
-    ]
-    stat_w = (inner.width - 28 - 10) // 3
-    for idx, (label, value, color) in enumerate(stats):
-        stat_rect = pygame.Rect(inner.x + 14 + idx * (stat_w + 5), stat_y, stat_w, 50)
-        _draw_parchment_chip(surface, stat_rect, small_font, title_font, label, value, color)
-
-    desc_y = stat_y + 64
-    body_lines = _selected_unit_lines(env, unit)[1:]
-    wrapped: list[str] = []
-    for line in body_lines:
-        wrapped.extend(_wrap_lines(line, body_font, inner.width - 28))
-    _draw_text_block(surface, body_font, wrapped, inner.x + 14, desc_y, PARCH_BODY, 19)
-    return close_rect
-
-
-def _draw_selected_object_panel(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    small_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    env: AgeGridEnv,
-    rect: pygame.Rect,
-    *,
-    title: str,
-    subtitle: str,
-    lines: list[str],
-    hp_value: int | None = None,
-    hp_max: int | None = None,
-    icon_kind: str | None = None,
-    icon_drawer=None,
-    accent: tuple[int, int, int] = TEXT_PRIMARY,
-) -> pygame.Rect:
-    inner = _draw_parchment_panel_frame(surface, board_assets, rect)
-
-    close_rect = _draw_parchment_close_button(surface, board_assets, pygame.Rect(inner.right - 26, inner.y + 6, 22, 22))
-
-    icon_center = (inner.x + 38, inner.y + 38)
-    pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
-    drew_icon = False
-    if icon_kind is not None:
-        sprite = board_assets.object_sprite(icon_kind)
-        if sprite is not None:
-            scaled = _safe_scale(sprite, (36, 36))
-            if scaled is not None:
-                screen_rect = scaled.get_rect(center=(icon_center[0], icon_center[1] + 2))
-                surface.blit(scaled, screen_rect)
-                drew_icon = True
-    if not drew_icon and icon_drawer is not None:
-        icon_drawer(icon_center)
-
-    _draw_shadow_text(surface, title_font, title, inner.x + 72, inner.y + 10, PARCH_TITLE, shadow=PARCH_SHADOW, shadow_offset=0)
-    _draw_shadow_text(surface, body_font, subtitle, inner.x + 72, inner.y + 36, accent, shadow=PARCH_SHADOW, shadow_offset=0)
-    pygame.draw.line(surface, PARCH_LINE, (inner.x + 12, inner.y + 64), (inner.right - 12, inner.y + 64), 1)
-
-    body_y = inner.y + 84
-    if hp_value is not None and hp_max is not None:
-        health_rect = pygame.Rect(inner.x + 14, body_y, inner.width - 28, 24)
-        _draw_shadow_text(surface, body_font, f"Health {hp_value}/{hp_max}", health_rect.x, health_rect.y - 18, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
-        _draw_ui_meter(surface, board_assets, health_rect, hp_value, hp_max, color_family="red")
-        body_y = health_rect.bottom + 20
-
-    wrapped: list[str] = []
-    for line in lines:
-        wrapped.extend(_wrap_lines(line, body_font, inner.width - 28))
-    _draw_text_block(surface, body_font, wrapped, inner.x + 14, body_y, PARCH_BODY, 19)
-    return close_rect
-
 def _draw_parchment_panel_frame(
     surface: pygame.Surface,
     board_assets: BoardAssets,
@@ -1635,6 +1350,55 @@ def _draw_unit_icon(screen: pygame.Surface, unit, center: tuple[int, int], fill:
         pygame.draw.circle(screen, border, (cx, cy), 13, width=2)
 
 
+_RESEARCH_DRAW_HELPERS = ResearchDrawHelpers(
+    draw_parchment_panel_frame=_draw_parchment_panel_frame,
+    draw_parchment_header=_draw_parchment_header,
+    draw_parchment_close_button=_draw_parchment_close_button,
+    draw_scaled_sprite=_draw_scaled_sprite,
+    draw_shadow_text=_draw_shadow_text,
+    draw_text_block=_draw_text_block,
+    wrap_lines=_wrap_lines,
+    fit_text=_fit_text,
+)
+
+
+_PANEL_DRAW_HELPERS = PanelDrawHelpers(
+    draw_parchment_panel_frame=_draw_parchment_panel_frame,
+    draw_parchment_header=_draw_parchment_header,
+    draw_parchment_close_button=_draw_parchment_close_button,
+    draw_unit_sprite=_draw_unit_sprite,
+    draw_unit_icon=_draw_unit_icon,
+    draw_shadow_text=_draw_shadow_text,
+    draw_text_block=_draw_text_block,
+    draw_ui_meter=_draw_ui_meter,
+    draw_parchment_chip=_draw_parchment_chip,
+    draw_parchment_button=_draw_parchment_button,
+    wrap_lines=_wrap_lines,
+    building_label=_building_label,
+)
+
+_PANEL_TEXT = PanelText(
+    unit_labels=UNIT_LABELS,
+    unit_help=UNIT_HELP,
+    building_help=BUILDING_HELP,
+    resource_labels=RESOURCE_LABELS,
+    resource_help=RESOURCE_HELP,
+)
+
+_PANEL_COLORS = PanelColors(
+    red_primary=RED_PRIMARY,
+    blue_primary=BLUE_PRIMARY,
+    red_accent=RED_ACCENT,
+    blue_accent=BLUE_ACCENT,
+    parch_title=PARCH_TITLE,
+    parch_body=PARCH_BODY,
+    parch_muted=PARCH_MUTED,
+    parch_shadow=PARCH_SHADOW,
+    parch_line=PARCH_LINE,
+    text_primary=TEXT_PRIMARY,
+)
+
+
 def _hex_origin(col: int, row: int, board_origin: tuple[int, int]) -> tuple[int, int]:
     left, top = hexgrid.hex_to_pixel(col, row, HEX_SIZE)
     return round(board_origin[0] + left), round(board_origin[1] + top)
@@ -1780,24 +1544,6 @@ def _hover_tile_lines(env: AgeGridEnv, pos: tuple[int, int]) -> list[str]:
     return []
 
 
-def _draw_hover_tile_panel(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    rect: pygame.Rect,
-    lines: list[str],
-) -> None:
-    if not lines:
-        return
-    inner = _draw_parchment_panel_frame(surface, board_assets, rect, panel_key="panel_beigeLight", inset_key="panelInset_beigeLight")
-    y = _draw_parchment_header(surface, title_font, body_font, inner, lines[0])
-    wrapped: list[str] = []
-    for line in lines[1:]:
-        wrapped.extend(_wrap_lines(line, body_font, inner.width - 16))
-    _draw_text_block(surface, body_font, wrapped, inner.x + 8, y, PARCH_BODY, 18)
-
-
 def _board_origin_for_layout(
     env: AgeGridEnv,
     board_x: int,
@@ -1814,38 +1560,6 @@ def _board_origin_for_layout(
     inner_width = board_width + 28
     origin_x = board_x + max(0, (board_width - inner_width) // 2) + 8
     return origin_x, origin_y
-
-
-def _board_origin_in_viewport(
-    viewport: pygame.Rect,
-    board_width: int,
-    board_height: int,
-    pan: tuple[float, float] = (0.0, 0.0),
-) -> tuple[int, int]:
-    origin_x = viewport.x + (viewport.width - board_width) / 2 + pan[0]
-    origin_y = viewport.y + (viewport.height - board_height) / 2 + HEX_SIZE + pan[1]
-    return round(origin_x), round(origin_y)
-
-
-def _clamp_camera_pan(
-    viewport: pygame.Rect,
-    board_width: int,
-    board_height: int,
-    pan: tuple[float, float],
-) -> tuple[float, float]:
-    bleed = 56
-    if board_width <= viewport.width:
-        max_x = bleed
-    else:
-        max_x = (board_width - viewport.width) / 2 + bleed
-    if board_height <= viewport.height:
-        max_y = bleed
-    else:
-        max_y = (board_height - viewport.height) / 2 + bleed
-    return (
-        max(-max_x, min(max_x, pan[0])),
-        max(-max_y, min(max_y, pan[1])),
-    )
 
 
 def _hover_panel_rect(
@@ -1868,174 +1582,6 @@ def _hover_panel_rect(
     if y < 8:
         y = 8
     return pygame.Rect(x, y, width, height)
-
-
-def _tech_tree_positions(rect: pygame.Rect) -> dict[str, tuple[int, int]]:
-    max_column = max(definition.column for definition in tech.TECH_DEFS.values())
-    max_row = max(definition.row for definition in tech.TECH_DEFS.values())
-    detail_width = min(268, max(220, rect.width // 4))
-    tree_width = max(360, rect.width - detail_width - 80)
-    left = rect.x + 72
-    top = rect.y + 96
-    x_gap = max(116, tree_width // max(1, max_column - 1))
-    available_height = max(420, rect.height - 180)
-    y_gap = max(56, available_height // max(1, max_row + 1))
-    return {
-        tech_id: (left + (definition.column - 1) * x_gap, top + definition.row * y_gap)
-        for tech_id, definition in tech.TECH_DEFS.items()
-    }
-
-
-def _draw_tech_tree_overlay(
-    surface: pygame.Surface,
-    title_font: pygame.font.Font,
-    body_font: pygame.font.Font,
-    board_assets: BoardAssets,
-    env: AgeGridEnv,
-    rect: pygame.Rect,
-    focus_faction: str,
-    human_turn_active: bool,
-    mouse_pos: tuple[int, int],
-) -> dict[str, pygame.Rect]:
-    detail_width = min(268, max(220, rect.width // 4))
-    node_width = 96 if rect.width < 1180 else 112
-    node_height = 74 if rect.height < 860 else 68
-    node_half_w = node_width // 2
-    node_half_h = node_height // 2
-    unlock_wrap_width = max(74, node_width - 16)
-
-    veil = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
-    veil.fill((8, 12, 18, 170))
-    surface.blit(veil, (0, 0))
-    pygame.draw.rect(surface, (20, 27, 35), rect, border_radius=14)
-    pygame.draw.rect(surface, (86, 102, 119), rect, width=2, border_radius=14)
-    _draw_shadow_text(
-        surface,
-        title_font,
-        "Research tree",
-        rect.x + 16,
-        rect.y + 14,
-        (235, 239, 244),
-        shadow=(10, 12, 16),
-    )
-    note = "Press T to close"
-    note_width = body_font.size(note)[0]
-    _draw_shadow_text(
-        surface,
-        body_font,
-        note,
-        rect.right - note_width - 18,
-        rect.y + 18,
-        (186, 194, 202),
-        shadow=(10, 12, 16),
-        shadow_offset=1,
-    )
-    subtitle = "Unlock paths, status, and what each tech enables"
-    _draw_shadow_text(surface, body_font, subtitle, rect.x + 16, rect.y + 46, TEXT_SECONDARY, shadow=(10, 12, 16), shadow_offset=1)
-
-    positions = _tech_tree_positions(rect)
-    node_rects: dict[str, pygame.Rect] = {}
-    for tech_id, definition in tech.TECH_DEFS.items():
-        start = positions[tech_id]
-        for req in definition.requires:
-            end = positions[req]
-            points = [
-                (end[0] + node_half_w, end[1]),
-                ((start[0] + end[0]) // 2, end[1]),
-                ((start[0] + end[0]) // 2, start[1]),
-                (start[0] - node_half_w, start[1]),
-            ]
-            pygame.draw.lines(surface, (88, 102, 118), False, points, 3)
-
-    legend = [("Done", (78, 122, 86)), ("Active", (95, 121, 166)), ("Ready", (129, 112, 70)), ("Locked", (70, 76, 84))]
-    lx = rect.x + 16
-    for label, color in legend:
-        chip = pygame.Rect(lx, rect.bottom - 34, 70, 20)
-        pygame.draw.rect(surface, color, chip, border_radius=10)
-        _draw_shadow_text(surface, body_font, label, chip.x + 12, chip.y + 2, TEXT_PRIMARY, shadow=(10, 12, 16), shadow_offset=1)
-        lx += 82
-
-    for tech_id in TECH_TREE_ORDER:
-        cx, cy = positions[tech_id]
-        node_rect = pygame.Rect(cx - node_half_w, cy - node_half_h, node_width, node_height)
-        node_rects[tech_id] = node_rect
-        red_status = _tech_status(env, "Red", tech_id)
-        blue_status = _tech_status(env, "Blue", tech_id)
-        focus_status = _tech_status(env, focus_faction, tech_id)
-        unlocked_any = red_status == "Done" or blue_status == "Done"
-        ready_any = red_status == "Ready" or blue_status == "Ready"
-        active_any = red_status.startswith("Active") or blue_status.startswith("Active")
-        node_fill = (74, 80, 88)
-        if unlocked_any:
-            node_fill = (54, 75, 58)
-        elif active_any:
-            node_fill = (58, 76, 104)
-        elif ready_any:
-            node_fill = (92, 79, 54)
-        pygame.draw.rect(surface, node_fill, node_rect, border_radius=14)
-        border_color = (184, 194, 206)
-        if human_turn_active and focus_status == "Ready":
-            border_color = (241, 214, 154)
-        if node_rect.collidepoint(mouse_pos):
-            border_color = (224, 233, 242)
-        pygame.draw.rect(surface, border_color, node_rect, width=2, border_radius=14)
-
-        style = TECH_ICON_STYLES.get(tech_id, {"label": "?", "bg": (74, 80, 88), "fg": (235, 239, 242)})
-        icon_rect = pygame.Rect(node_rect.x + 8, node_rect.y + 8, 24, 24)
-        pygame.draw.rect(surface, style["bg"], icon_rect, border_radius=6)
-        pygame.draw.rect(surface, (236, 240, 244), icon_rect, width=1, border_radius=6)
-        _draw_shadow_text(surface, body_font, style["label"], icon_rect.x + 6, icon_rect.y + 2, style["fg"], shadow=(12, 16, 20), shadow_offset=1)
-        label_lines = _wrap_lines(_tech_label(tech_id), body_font, max(48, node_width - 44))
-        _draw_text_block(surface, body_font, label_lines[:2], node_rect.x + 38, node_rect.y + 8, TEXT_PRIMARY, 15)
-        unlocks = tech.TECH_DEFS[tech_id].summary
-        unlock_lines = _wrap_lines(unlocks, body_font, unlock_wrap_width)
-        _draw_text_block(surface, body_font, unlock_lines[:2], node_rect.x + 8, node_rect.y + 38, TEXT_SECONDARY, 14)
-
-        red_chip = pygame.Rect(node_rect.x + 8, node_rect.bottom + 6, 44, 18)
-        blue_chip = pygame.Rect(node_rect.right - 52, node_rect.bottom + 6, 44, 18)
-        pygame.draw.rect(surface, (82, 52, 52), red_chip, border_radius=9)
-        pygame.draw.rect(surface, (52, 66, 92), blue_chip, border_radius=9)
-        red_text = "Done" if red_status == "Done" else "Act" if red_status.startswith("Active") else "Go" if red_status == "Ready" else "-"
-        blue_text = "Done" if blue_status == "Done" else "Act" if blue_status.startswith("Active") else "Go" if blue_status == "Ready" else "-"
-        _draw_shadow_text(surface, body_font, f"R {red_text}", red_chip.x + 7, red_chip.y + 1, (244, 184, 180), shadow=(10, 12, 16), shadow_offset=1)
-        _draw_shadow_text(surface, body_font, f"B {blue_text}", blue_chip.x + 7, blue_chip.y + 1, (176, 214, 255), shadow=(10, 12, 16), shadow_offset=1)
-
-    hovered_tech_id = next((tech_id for tech_id, node_rect in node_rects.items() if node_rect.collidepoint(mouse_pos)), None)
-    if hovered_tech_id is None:
-        available_focus = _available_research_ids(env, focus_faction)
-        hovered_tech_id = available_focus[0] if available_focus else TECH_TREE_ORDER[0]
-
-    detail_rect = pygame.Rect(rect.right - detail_width - 24, rect.y + 84, detail_width, rect.height - 138)
-    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel"), detail_rect):
-        _draw_panel(surface, detail_rect, fill=(135, 98, 61), border=(193, 149, 98), radius=14)
-    inner = detail_rect.inflate(-18, -22)
-    if not _draw_scaled_sprite(surface, board_assets.ui_sprite("panel_inset"), inner):
-        pygame.draw.rect(surface, (216, 193, 144), inner, border_radius=12)
-        pygame.draw.rect(surface, (180, 152, 111), inner, width=2, border_radius=12)
-
-    style = TECH_ICON_STYLES.get(hovered_tech_id, {"label": "?", "bg": (74, 80, 88), "fg": (235, 239, 242)})
-    icon_rect = pygame.Rect(inner.x + 14, inner.y + 14, 34, 34)
-    pygame.draw.rect(surface, style["bg"], icon_rect, border_radius=8)
-    pygame.draw.rect(surface, (236, 240, 244), icon_rect, width=1, border_radius=8)
-    _draw_shadow_text(surface, body_font, style["label"], icon_rect.x + 10, icon_rect.y + 5, style["fg"], shadow=(12, 16, 20), shadow_offset=1)
-    _draw_shadow_text(surface, title_font, _tech_label(hovered_tech_id), inner.x + 58, inner.y + 14, (76, 58, 40), shadow=(244, 226, 190), shadow_offset=0)
-
-    detail_y = inner.y + 60
-    for line in _tech_detail_lines(env, focus_faction, hovered_tech_id):
-        wrapped = _wrap_lines(line, body_font, inner.width - 28)
-        _draw_text_block(surface, body_font, wrapped, inner.x + 14, detail_y, (84, 72, 58), 18)
-        detail_y += len(wrapped) * 18 + 6
-
-    action_hint = (
-        "Click this node to start research."
-        if human_turn_active and tech.can_research(env, focus_faction, hovered_tech_id)
-        else f"Viewing {focus_faction} research state."
-        if not human_turn_active
-        else "Hover another tech to inspect prerequisites."
-    )
-    hint_lines = _wrap_lines(action_hint, body_font, inner.width - 28)
-    _draw_text_block(surface, body_font, hint_lines, inner.x + 14, inner.bottom - 42, (112, 93, 72), 18)
-    return node_rects
 
 
 def _tile_center(ox: int, oy: int, tile: int, pos: tuple[int, int]) -> tuple[int, int]:
@@ -2227,108 +1773,26 @@ def _draw_setup_screen(
     return red_card, blue_card, rules_btn, start_btn
 
 
-def _turn_history_text(history: list[TurnSnapshot]) -> list[str]:
-    lines: list[str] = []
-    for snapshot in history:
-        lines.append(
-            f"Turn {snapshot.turn_number}: Red={snapshot.red.last_action} | Blue={snapshot.blue.last_action}"
-        )
-        lines.append(
-            f"  Red log: {', '.join(snapshot.red.log) if snapshot.red.log else '-'}"
-        )
-        lines.append(
-            f"  Blue log: {', '.join(snapshot.blue.log) if snapshot.blue.log else '-'}"
-        )
-    return lines
-
-
-def _build_debug_snapshot(
-    env: AgeGridEnv,
-    red_agent_label: str,
-    blue_agent_label: str,
-    red_info: FactionTurnInfo,
-    blue_info: FactionTurnInfo,
-    history: list[TurnSnapshot],
-) -> str:
-    lines = [
-        "=== AgeGrid Debug Snapshot ===",
-        f"Turn: {env.turn}",
-        f"Year/Era: {env.formatted_year()} / {env.current_era()}",
-        f"Current player: {env.factions[env.current_player]}",
-        f"Winner: {env.winner() or '-'}",
-        f"Relations: {env.relation_state('Red', 'Blue').state.title()}",
-        f"Collapse rule: {'On' if env.config.collapse_enabled else 'Off'}",
-        f"Red agent: {red_agent_label}",
-        f"Blue agent: {blue_agent_label}",
-        f"Red bank/base HP: {env.bank['Red']} / {env.bases['Red'].hp}",
-        f"Blue bank/base HP: {env.bank['Blue']} / {env.bases['Blue'].hp}",
-        (
-            f"Red threat/mode: {threat_level(env, 'Red')} / "
-            f"{'Defense' if defense_mode_active(env, 'Red') else 'Push' if push_mode_active(env, 'Red') else 'Field'}"
-        ),
-        (
-            f"Blue threat/mode: {threat_level(env, 'Blue')} / "
-            f"{'Defense' if defense_mode_active(env, 'Blue') else 'Push' if push_mode_active(env, 'Blue') else 'Field'}"
-        ),
-        f"Red army plan: {army_plan(env, 'Red')}",
-        f"Blue army plan: {army_plan(env, 'Blue')}",
-        f"Red heuristic: {heuristic_diagnostics_label(env, 'Red')}",
-        f"Blue heuristic: {heuristic_diagnostics_label(env, 'Blue')}",
-        f"Red techs: {', '.join(sorted(env.faction_state('Red').techs_unlocked)) or '-'}",
-        f"Blue techs: {', '.join(sorted(env.faction_state('Blue').techs_unlocked)) or '-'}",
-        f"Red buildings: {', '.join(sorted(f'{_building_label(b.building_type)}@{b.position}' for b in env.buildings if b.faction == 'Red' and b.hp > 0)) or '-'}",
-        f"Blue buildings: {', '.join(sorted(f'{_building_label(b.building_type)}@{b.position}' for b in env.buildings if b.faction == 'Blue' and b.hp > 0)) or '-'}",
-        (
-            "Red comp/base force: "
-            f"{unit_composition(env, 'Red')} / {army_strength_near_base(env, 'Red')[0]} vs {army_strength_near_base(env, 'Red')[1]}"
-        ),
-        (
-            "Blue comp/base force: "
-            f"{unit_composition(env, 'Blue')} / {army_strength_near_base(env, 'Blue')[0]} vs {army_strength_near_base(env, 'Blue')[1]}"
-        ),
-        "Units:",
-    ]
-    lines.extend(
-        f"  {u.faction} {u.unit_type}#{u.id} pos={u.position} hp={u.hp} atk={u.attack_damage} rng={u.attack_range}"
-        for u in sorted(env.units, key=lambda unit: (unit.faction, unit.unit_type, unit.id))
-    )
-    lines.extend(
-        [
-            f"Last red action: {red_info.last_action}",
-            f"Last blue action: {blue_info.last_action}",
-            f"Red log: {', '.join(red_info.log) if red_info.log else '-'}",
-            f"Blue log: {', '.join(blue_info.log) if blue_info.log else '-'}",
-            "Full turn history:",
-        ]
-    )
-    lines.extend(_turn_history_text(history))
-    return "\n".join(lines)
-
-
-def _write_debug_snapshot(snapshot_text: str) -> Path:
-    output_path = Path.cwd() / "agegrid_debug_snapshot.txt"
-    output_path.write_text(snapshot_text, encoding="utf-8")
-    return output_path
-
-
 def run_viewer() -> None:
     pygame.init()
     pygame.display.set_caption("AgeGrid Viewer")
 
-    _set_hex_zoom(1.0)
+    _set_hex_zoom(DEFAULT_VIEWER_ZOOM)
     env = AgeGridEnv()
     pad = 20
     side_panel = 320
     default_board_width, default_board_height = _board_pixel_size(env)
+    board_viewport_width = default_board_width + BOARD_VIEWPORT_EXTRA_W
+    board_viewport_height = default_board_height + BOARD_VIEWPORT_EXTRA_H
 
     # HUD layout — three horizontal zones across the board width
-    faction_bar_w = max(180, min(HUD_FACTION_W, (default_board_width - 20) // 3))
+    faction_bar_w = max(220, min(HUD_FACTION_W, (board_viewport_width - 28) // 3))
     center_zone_x = pad + faction_bar_w + 8
-    center_zone_w = default_board_width - 2 * faction_bar_w - 16
+    center_zone_w = board_viewport_width - 2 * faction_bar_w - 16
     top_bar = HUD_H + pad + 10   # total vertical space reserved for the top HUD strip
 
-    width_px = pad * 3 + default_board_width + side_panel + 36
-    height_px = pad * 2 + top_bar + default_board_height + BASE_HEX_SIZE + 44
+    width_px = pad * 3 + board_viewport_width + side_panel + 36
+    height_px = pad * 2 + top_bar + board_viewport_height + BASE_HEX_SIZE + 44
 
     screen = pygame.display.set_mode((width_px, height_px))
     clock = pygame.time.Clock()
@@ -2336,8 +1800,8 @@ def run_viewer() -> None:
 
     font = pygame.font.SysFont("segoeui", 24, bold=True)
     big = pygame.font.SysFont("segoeui", 34, bold=True)
-    small = pygame.font.SysFont("segoeui", 18)
-    tiny = pygame.font.SysFont("segoeui", 16)
+    small = pygame.font.SysFont("segoeui", 19)
+    tiny = pygame.font.SysFont("segoeui", 17)
 
     board_x = pad
     board_content_top = pad + top_bar + 4
@@ -2345,16 +1809,12 @@ def run_viewer() -> None:
     board_rect = pygame.Rect(
         board_x,
         board_content_top,
-        default_board_width,
-        max(default_board_height, board_content_bottom - board_content_top),
+        board_viewport_width,
+        max(board_viewport_height, board_content_bottom - board_content_top),
     )
-    # End-turn button on the right of the centre HUD zone, vertically centred
-    btn_w, btn_h = 130, 32
-    btn_rect = pygame.Rect(
-        center_zone_x + center_zone_w - btn_w - HUD_INNER_PAD,
-        pad + (HUD_H - btn_h) // 2,
-        btn_w, btn_h,
-    )
+    # btn_rect and next_faction_btn_rect are updated each frame from _draw_center_hud
+    btn_rect = pygame.Rect(0, 0, 0, 0)
+    next_faction_btn_rect = pygame.Rect(0, 0, 0, 0)
 
     red_index = 0
     blue_index = 0
@@ -2372,6 +1832,13 @@ def run_viewer() -> None:
     active_human_faction: str | None = None
     show_tech_tree = False
     show_debug = False
+    tech_tree_scroll = 0
+    tech_tree_pan_x = 0
+    tech_tree_dragging = False
+    tech_tree_last_mouse = (0, 0)
+    tech_tree_drag_start_mouse = (0, 0)
+    tech_tree_drag_moved = False
+    tech_tree_close_rect = pygame.Rect(0, 0, 0, 0)
     event_scroll = 0
     event_panel_rect = pygame.Rect(0, 0, 0, 0)
     tech_btn_rect = pygame.Rect(0, 0, 0, 0)
@@ -2382,14 +1849,10 @@ def run_viewer() -> None:
     selected_tile: tuple[int, int] | None = None
     selected_unit_id: int | None = None
     pending_build_type: str | None = None
-    camera_zoom = 1.0
-    camera_pan = [0.0, 0.0]
-    panning = False
-    pan_anchor_mouse = (0, 0)
-    pan_anchor = (0.0, 0.0)
-    pan_drag_distance = 0.0
+    camera_state = CameraState()
+    _reset_camera_state(camera_state, DEFAULT_VIEWER_ZOOM)
     board_backdrop = board_rect.inflate(22, 28)
-    board_origin = _board_origin_in_viewport(board_rect, default_board_width, default_board_height)
+    board_origin = _board_origin_in_viewport(board_rect, default_board_width, default_board_height, HEX_SIZE)
 
     running = True
     while running:
@@ -2440,13 +1903,12 @@ def run_viewer() -> None:
                         selected_tile = None
                         selected_unit_id = None
                         pending_build_type = None
-                        camera_zoom = _set_hex_zoom(1.0)
-                        camera_pan = [0.0, 0.0]
+                        _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
                             env.start_faction_turn()
                             active_human_faction = env.factions[env.current_player]
                         in_setup = False
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if red_card.collidepoint(event.pos):
                         red_index = (red_index + 1) % len(AGENT_SPECS)
                     elif blue_card.collidepoint(event.pos):
@@ -2468,8 +1930,7 @@ def run_viewer() -> None:
                         selected_tile = None
                         selected_unit_id = None
                         pending_build_type = None
-                        camera_zoom = _set_hex_zoom(1.0)
-                        camera_pan = [0.0, 0.0]
+                        _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
                             env.start_faction_turn()
                             active_human_faction = env.factions[env.current_player]
@@ -2497,6 +1958,8 @@ def run_viewer() -> None:
                 elif event.key == pygame.K_r:
                     in_setup = True
                     show_tech_tree = False
+                    tech_tree_dragging = False
+                    tech_tree_drag_moved = False
                     human_moved_units = set()
                     human_turn_actions = []
                     human_turn_log = []
@@ -2504,14 +1967,18 @@ def run_viewer() -> None:
                     selected_tile = None
                     selected_unit_id = None
                     pending_build_type = None
-                    camera_zoom = _set_hex_zoom(1.0)
-                    camera_pan = [0.0, 0.0]
+                    _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                 elif event.key == pygame.K_t:
                     show_tech_tree = not show_tech_tree
+                    if show_tech_tree:
+                        tech_tree_scroll = 0
+                        tech_tree_pan_x = 0
+                        tech_tree_dragging = False
+                        tech_tree_drag_moved = False
                 elif event.key == pygame.K_d:
                     show_debug = not show_debug
                 elif event.key == pygame.K_p:
-                    snapshot_text = _build_debug_snapshot(
+                    snapshot_text = build_debug_snapshot(
                         env,
                         AGENT_SPECS[red_index].label,
                         AGENT_SPECS[blue_index].label,
@@ -2519,7 +1986,7 @@ def run_viewer() -> None:
                         blue_info,
                         turn_history,
                     )
-                    output_path = _write_debug_snapshot(snapshot_text)
+                    output_path = write_debug_snapshot(snapshot_text)
                     print(snapshot_text)
                     print(f"\nSaved debug snapshot to: {output_path}\n")
                 elif event.key == pygame.K_g and human_turn_active and env.winner() is None:
@@ -2531,16 +1998,22 @@ def run_viewer() -> None:
                             human_turn_actions.append(action)
                             human_turn_log.append(reason)
                             effects.extend(_effects_from_actions(env, [action], current_faction))
+                elif event.key == pygame.K_TAB and not has_human_players and env.winner() is None:
+                    red_info, blue_info, snap, new_effects = _step_ai_faction(env, red_agent, blue_agent, red_info, blue_info)
+                    if snap is not None:
+                        turn_history.append(snap)
+                    effects.extend(new_effects)
+                    event_scroll = 0
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     if env.winner() is None:
                         if not has_human_players:
-                            red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
+                            red_info, blue_info, red_actions, blue_actions = step_full_turn(env, red_agent, blue_agent)
                             turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
                             effects.extend(_effects_from_actions(env, red_actions, "Red"))
                             effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                         else:
                             if human_turn_active:
-                                completed_info = _build_turn_info(
+                                completed_info = build_turn_info(
                                     current_faction,
                                     human_turn_actions,
                                     human_turn_log or ["stop"],
@@ -2573,38 +2046,100 @@ def run_viewer() -> None:
                             effects.extend(new_effects)
                         event_scroll = 0
 
-            if event.type == pygame.MOUSEWHEEL:
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if show_tech_tree and tech_tree_dragging and not tech_tree_drag_moved:
+                    if human_turn_active and env.winner() is None:
+                        clicked_tech_id = next(
+                            (tech_id for tech_id, node_rect in tech_tree_node_rects.items() if node_rect.collidepoint(event.pos)),
+                            None,
+                        )
+                        if clicked_tech_id is not None and tech.can_research(env, current_faction, clicked_tech_id):
+                            payload = ("research", clicked_tech_id)
+                            ok, reason = env.apply_action(payload)
+                            if ok:
+                                human_turn_actions.append(payload)
+                                human_turn_log.append(reason)
+                                effects.extend(_effects_from_actions(env, [payload], current_faction))
+                tech_tree_dragging = False
+                tech_tree_drag_moved = False
+
+            elif event.type == pygame.MOUSEMOTION:
+                if show_tech_tree and tech_tree_dragging:
+                    dx = event.pos[0] - tech_tree_last_mouse[0]
+                    dy = event.pos[1] - tech_tree_last_mouse[1]
+                    if abs(event.pos[0] - tech_tree_drag_start_mouse[0]) >= 6 or abs(event.pos[1] - tech_tree_drag_start_mouse[1]) >= 6:
+                        tech_tree_drag_moved = True
+
+                    overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
+                    tree_layout = _tech_tree_layout(font, tiny, overlay_rect)
+                    tech_tree_scroll, tech_tree_pan_x = _clamp_tech_tree_view(
+                        tree_layout.tree_rect,
+                        tech_tree_scroll - dy,
+                        tech_tree_pan_x + dx,
+                    )
+                    tech_tree_last_mouse = event.pos
+
+            elif event.type == pygame.MOUSEWHEEL:
                 mouse_pos = pygame.mouse.get_pos()
-                if event_panel_rect.width > 0 and event_panel_rect.collidepoint(mouse_pos):
+
+                if show_tech_tree:
+                    overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
+                    tree_layout = _tech_tree_layout(font, tiny, overlay_rect)
+                    tech_tree_scroll, tech_tree_pan_x = _clamp_tech_tree_view(
+                        tree_layout.tree_rect,
+                        tech_tree_scroll - event.y * 36,
+                        tech_tree_pan_x,
+                    )
+
+                elif event_panel_rect.width > 0 and event_panel_rect.collidepoint(mouse_pos):
                     event_scroll = max(0, event_scroll - event.y)
+
                 elif board_backdrop.collidepoint(mouse_pos):
-                    old_zoom = camera_zoom
+                    old_zoom = camera_state.zoom
                     old_board_width, old_board_height = _board_pixel_size(env)
-                    old_origin = _board_origin_in_viewport(board_rect, old_board_width, old_board_height, tuple(camera_pan))
                     zoom_delta = ZOOM_STEP if event.y > 0 else -ZOOM_STEP
-                    camera_zoom = _set_hex_zoom(camera_zoom + zoom_delta)
+                    new_zoom = _set_hex_zoom(camera_state.zoom + zoom_delta)
                     new_board_width, new_board_height = _board_pixel_size(env)
-                    centered_origin = _board_origin_in_viewport(board_rect, new_board_width, new_board_height)
-                    scale = camera_zoom / old_zoom if old_zoom else 1.0
-                    camera_pan[0] = mouse_pos[0] - scale * (mouse_pos[0] - old_origin[0]) - centered_origin[0]
-                    camera_pan[1] = mouse_pos[1] - scale * (mouse_pos[1] - old_origin[1]) - centered_origin[1]
-                    camera_pan[0], camera_pan[1] = _clamp_camera_pan(
+                    _apply_camera_zoom(
+                        camera_state,
+                        mouse_pos,
                         board_rect,
-                        new_board_width,
-                        new_board_height,
-                        tuple(camera_pan),
+                        old_zoom,
+                        (old_board_width, old_board_height),
+                        new_zoom,
+                        (new_board_width, new_board_height),
+                        HEX_SIZE,
                     )
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if show_tech_tree:
+                    if tech_tree_close_rect.collidepoint(event.pos):
+                        show_tech_tree = False
+                        tech_tree_dragging = False
+                        tech_tree_drag_moved = False
+                        continue
+                    overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
+                    tree_layout = _tech_tree_layout(font, tiny, overlay_rect)
+                    if tree_layout.tree_rect.collidepoint(event.pos):
+                        tech_tree_dragging = True
+                        tech_tree_last_mouse = event.pos
+                        tech_tree_drag_start_mouse = event.pos
+                        tech_tree_drag_moved = False
+                    elif not overlay_rect.collidepoint(event.pos):
+                        show_tech_tree = False
+                        tech_tree_dragging = False
+                        tech_tree_drag_moved = False
+                    continue
+
                 if btn_rect.collidepoint(event.pos) and env.winner() is None:
                     if not has_human_players:
-                        red_info, blue_info, red_actions, blue_actions = _step_full_turn(env, red_agent, blue_agent)
+                        red_info, blue_info, red_actions, blue_actions = step_full_turn(env, red_agent, blue_agent)
                         turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
                         effects.extend(_effects_from_actions(env, red_actions, "Red"))
                         effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                     else:
                         if human_turn_active:
-                            completed_info = _build_turn_info(
+                            completed_info = build_turn_info(
                                 current_faction,
                                 human_turn_actions,
                                 human_turn_log or ["stop"],
@@ -2636,19 +2171,12 @@ def run_viewer() -> None:
                         turn_history.extend(new_rounds)
                         effects.extend(new_effects)
                     event_scroll = 0
-                elif show_tech_tree and any(node_rect.collidepoint(event.pos) for node_rect in tech_tree_node_rects.values()):
-                    if human_turn_active and env.winner() is None:
-                        clicked_tech_id = next(
-                            (tech_id for tech_id, node_rect in tech_tree_node_rects.items() if node_rect.collidepoint(event.pos)),
-                            None,
-                        )
-                        if clicked_tech_id is not None and tech.can_research(env, current_faction, clicked_tech_id):
-                            payload = ("research", clicked_tech_id)
-                            ok, reason = env.apply_action(payload)
-                            if ok:
-                                human_turn_actions.append(payload)
-                                human_turn_log.append(reason)
-                                effects.extend(_effects_from_actions(env, [payload], current_faction))
+                elif next_faction_btn_rect.width > 0 and next_faction_btn_rect.collidepoint(event.pos) and env.winner() is None:
+                    red_info, blue_info, snap, new_effects = _step_ai_faction(env, red_agent, blue_agent, red_info, blue_info)
+                    if snap is not None:
+                        turn_history.append(snap)
+                    effects.extend(new_effects)
+                    event_scroll = 0
                 elif any(button_rect.collidepoint(event.pos) for button_rect, _, _ in human_action_button_rects):
                     for button_rect, payload, enabled in human_action_button_rects:
                         if not button_rect.collidepoint(event.pos):
@@ -2671,9 +2199,13 @@ def run_viewer() -> None:
                     pending_build_type = None
                 elif tech_btn_rect.collidepoint(event.pos):
                     show_tech_tree = not show_tech_tree
+                    tech_tree_dragging = False
+                    tech_tree_drag_moved = False
+                    if show_tech_tree:
+                        tech_tree_scroll = 0
+                        tech_tree_pan_x = 0
                 elif camera_btn_rect.collidepoint(event.pos):
-                    camera_zoom = _set_hex_zoom(1.0)
-                    camera_pan = [0.0, 0.0]
+                    _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                 elif board_rect.inflate(18, 18).collidepoint(event.pos):
                     clicked_tile = hexgrid.nearest_hex(
                         event.pos,
@@ -2738,44 +2270,27 @@ def run_viewer() -> None:
                             pending_build_type = None
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
                 if board_backdrop.collidepoint(event.pos):
-                    panning = True
-                    pan_anchor_mouse = event.pos
-                    pan_anchor = (camera_pan[0], camera_pan[1])
-                    pan_drag_distance = 0.0
-            elif event.type == pygame.MOUSEMOTION and panning:
-                dx = event.pos[0] - pan_anchor_mouse[0]
-                dy = event.pos[1] - pan_anchor_mouse[1]
+                    _begin_camera_pan(camera_state, event.pos)
+            elif event.type == pygame.MOUSEMOTION and camera_state.panning:
                 board_width, board_height = _board_pixel_size(env)
-                camera_pan[0], camera_pan[1] = _clamp_camera_pan(
-                    board_rect,
-                    board_width,
-                    board_height,
-                    (pan_anchor[0] + dx, pan_anchor[1] + dy),
-                )
-                pan_drag_distance = max(pan_drag_distance, math.hypot(dx, dy))
-            elif event.type == pygame.MOUSEBUTTONUP and event.button == 2 and panning:
-                panning = False
-                if pan_drag_distance < 8:
-                    camera_zoom = _set_hex_zoom(1.0)
-                    camera_pan = [0.0, 0.0]
+                _update_camera_pan(camera_state, event.pos, board_rect, board_width, board_height)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 2 and camera_state.panning:
+                if _end_camera_pan(camera_state):
+                    _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
 
         effects = _update_effects(effects)
         board_width, board_height = _board_pixel_size(env)
-        camera_pan[0], camera_pan[1] = _clamp_camera_pan(board_rect, board_width, board_height, tuple(camera_pan))
-        board_origin = _board_origin_in_viewport(board_rect, board_width, board_height, tuple(camera_pan))
+        camera_state.pan[0], camera_state.pan[1] = _clamp_camera_pan(board_rect, board_width, board_height, tuple(camera_state.pan))
+        board_origin = _board_origin_in_viewport(board_rect, board_width, board_height, HEX_SIZE, tuple(camera_state.pan))
         board_backdrop = board_rect.inflate(22, 28)
         screen.fill((9, 13, 18))
         hud_rect = pygame.Rect(0, 0, width_px, top_bar)
         pygame.draw.rect(screen, HUD_BG, hud_rect)
         pygame.draw.line(screen, PANEL_SOFT, (0, top_bar - 1), (width_px, top_bar - 1), 2)
-        sidebar_x = board_x + default_board_width + pad
+        sidebar_x = board_x + board_viewport_width + pad
         sidebar_rect = pygame.Rect(sidebar_x, pad, side_panel, height_px - pad * 2)
         _draw_panel(screen, sidebar_rect, fill=(16, 22, 29), border=PANEL_SOFT, radius=16)
 
-        red_workers = sum(1 for u in env.units if u.faction == "Red" and u.unit_type == "worker")
-        blue_workers = sum(1 for u in env.units if u.faction == "Blue" and u.unit_type == "worker")
-        red_military = sum(1 for u in env.units if u.faction == "Red" and u.attack_damage > 0)
-        blue_military = sum(1 for u in env.units if u.faction == "Blue" and u.attack_damage > 0)
         winner = env.winner()
         current_agent_key = _current_agent_key(env, red_index, blue_index)
         human_turn_active = _is_human_agent_key(current_agent_key)
@@ -2785,36 +2300,42 @@ def run_viewer() -> None:
 
         # ── Three-zone top HUD ────────────────────────────────────────────────
         red_bar_rect  = pygame.Rect(board_x, pad, faction_bar_w, HUD_H)
-        blue_bar_rect = pygame.Rect(board_x + default_board_width - faction_bar_w, pad, faction_bar_w, HUD_H)
+        blue_bar_rect = pygame.Rect(board_x + board_viewport_width - faction_bar_w, pad, faction_bar_w, HUD_H)
         center_rect   = pygame.Rect(center_zone_x, pad, center_zone_w, HUD_H)
 
-        red_stance  = "Defense" if defense_mode_active(env, "Red")  else "Push" if push_mode_active(env, "Red")  else "Field"
-        blue_stance = "Defense" if defense_mode_active(env, "Blue") else "Push" if push_mode_active(env, "Blue") else "Field"
-        max_base_hp = env.base_max_hp(current_faction)
+        red_relation = env.relation_state("Red", "Blue").state.title()
+        blue_relation = env.relation_state("Blue", "Red").state.title()
 
         _draw_faction_bar(screen, small, tiny, board_assets, red_bar_rect,
             "Red", AGENT_SPECS[red_index].label,
-            env.bank["Red"], red_workers, red_military,
+            env.bank["Red"], _faction_income(env, "Red"), _faction_army_summary(env, "Red"),
             env.bases["Red"].hp, env.base_max_hp("Red"),
-            env.current_era(), red_stance, RED_PRIMARY)
+            env.current_era(), red_relation, _faction_research_label(env, "Red"), RED_PRIMARY)
 
         _draw_faction_bar(screen, small, tiny, board_assets, blue_bar_rect,
             "Blue", AGENT_SPECS[blue_index].label,
-            env.bank["Blue"], blue_workers, blue_military,
+            env.bank["Blue"], _faction_income(env, "Blue"), _faction_army_summary(env, "Blue"),
             env.bases["Blue"].hp, env.base_max_hp("Blue"),
-            env.current_era(), blue_stance, BLUE_PRIMARY)
+            env.current_era(), blue_relation, _faction_research_label(env, "Blue"), BLUE_PRIMARY)
 
-        _draw_center_hud(screen, big, small, tiny, board_assets, center_rect, btn_rect,
-            env, winner, human_turn_active, turn_button_label, current_faction)
+        # Resolve selection early so the center HUD can show context-sensitive info
+        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
+        btn_rect, next_faction_btn_rect = _draw_center_hud(screen, big, small, tiny, board_assets, center_rect,
+            env, winner, human_turn_active, turn_button_label, current_faction,
+            selected_unit=selected_unit, selected_tile=selected_tile,
+            ai_vs_ai=not has_human_players)
 
         # ── Right sidebar ─────────────────────────────────────────────────────
         # Cap panel heights so research + tactical + event all fit inside the sidebar
         _min_event_h = 140
         _btn_area = 8 + 30 + 10  # gap-before + btn-height + gap-after
         _panel_budget = max(200, sidebar_rect.bottom - 8 - (pad + 12) - _min_event_h - _btn_area)
-        research_panel_h = min(_research_panel_height(font, tiny, env, side_panel - 24), _panel_budget * 55 // 100)
+        research_panel_h = min(
+            _research_panel_height(_RESEARCH_DRAW_HELPERS, font, tiny, env, side_panel - 24),
+            _panel_budget * 55 // 100,
+        )
         research_panel = pygame.Rect(sidebar_x + 12, pad + 12, side_panel - 24, research_panel_h)
-        _draw_research_panel(screen, font, tiny, board_assets, env, research_panel)
+        _draw_research_panel(_RESEARCH_DRAW_HELPERS, screen, font, tiny, board_assets, env, research_panel)
         tech_btn_rect = pygame.Rect(research_panel.x, research_panel.bottom + 8, 132, 30)
         _draw_small_button(screen, tiny, tech_btn_rect, "Research Tree", active=show_tech_tree)
         if current_research_count > 0:
@@ -2830,7 +2351,7 @@ def run_viewer() -> None:
                 "Hover nodes for details. Click a ready node to start it.",
             ]
             hover_rect = pygame.Rect(tech_btn_rect.right + 10, tech_btn_rect.y - 8, 190, 78)
-            _draw_hover_tile_panel(screen, small, tiny, board_assets, hover_rect, hover_lines)
+            _draw_hover_tile_panel(_PANEL_DRAW_HELPERS, _PANEL_COLORS, screen, small, tiny, board_assets, hover_rect, hover_lines)
 
         tactical_panel_h = min(_tactical_panel_height(font, tiny, env, side_panel - 24), _panel_budget - research_panel_h)
         tactical_panel = pygame.Rect(sidebar_x + 12, tech_btn_rect.bottom + 10, side_panel - 24, tactical_panel_h)
@@ -2852,7 +2373,8 @@ def run_viewer() -> None:
         _draw_panel(screen, board_backdrop, fill=(13, 19, 26), border=PANEL_SOFT, radius=20)
         inset = board_backdrop.inflate(-10, -10)
         pygame.draw.rect(screen, (17, 24, 32), inset, border_radius=18)
-        zoom_label = f"{int(round(camera_zoom * 100))}%"
+        display_zoom = 100 if DEFAULT_VIEWER_ZOOM <= 0 else int(round((camera_state.zoom / DEFAULT_VIEWER_ZOOM) * 100))
+        zoom_label = f"{display_zoom}%"
         zoom_badge = pygame.Rect(board_backdrop.right - 158, board_backdrop.y + 12, 64, 28)
         pygame.draw.rect(screen, PANEL_INSET, zoom_badge, border_radius=10)
         pygame.draw.rect(screen, PANEL_SOFT, zoom_badge, width=1, border_radius=10)
@@ -2869,7 +2391,6 @@ def run_viewer() -> None:
         camera_btn_rect = pygame.Rect(board_backdrop.right - 86, board_backdrop.y + 11, 74, 30)
         _draw_small_button(screen, tiny, camera_btn_rect, "Reset")
 
-        selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
         valid_move_targets: set[tuple[int, int]] = set()
         valid_build_targets: set[tuple[int, int]] = set()
         if human_turn_active and selected_unit is not None:
@@ -3068,7 +2589,7 @@ def run_viewer() -> None:
             if hover_lines:
                 tile_rect = _hex_bounds(hover_pos[0], hover_pos[1], board_origin)
                 hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
-                _draw_hover_tile_panel(screen, small, tiny, board_assets, hover_rect, hover_lines)
+                _draw_hover_tile_panel(_PANEL_DRAW_HELPERS, _PANEL_COLORS, screen, small, tiny, board_assets, hover_rect, hover_lines)
 
         if selected_unit is None:
             selected_unit_id = None
@@ -3076,6 +2597,9 @@ def run_viewer() -> None:
         else:
             inspect_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 18, 300, 268)
             selected_unit_close_rect = _draw_selected_unit_panel(
+                _PANEL_DRAW_HELPERS,
+                _PANEL_TEXT,
+                _PANEL_COLORS,
                 screen,
                 small,
                 tiny,
@@ -3094,6 +2618,8 @@ def run_viewer() -> None:
                 spec = production.building_stats(env, selected_building.faction, selected_building.building_type)
                 max_hp = spec.hp if spec is not None else selected_building.hp
                 selected_unit_close_rect = _draw_selected_object_panel(
+                    _PANEL_DRAW_HELPERS,
+                    _PANEL_COLORS,
                     screen,
                     small,
                     tiny,
@@ -3103,7 +2629,7 @@ def run_viewer() -> None:
                     inspect_rect,
                     title=_building_label(selected_building.building_type),
                     subtitle=f"{selected_building.faction} Building",
-                    lines=_selected_building_lines(env, selected_building)[1:],
+                    lines=_selected_building_lines(_PANEL_DRAW_HELPERS, _PANEL_TEXT, env, selected_building)[1:],
                     hp_value=selected_building.hp,
                     hp_max=max_hp,
                     icon_kind=selected_building.building_type,
@@ -3112,6 +2638,8 @@ def run_viewer() -> None:
             elif selected_base_entry is not None:
                 faction, selected_base = selected_base_entry
                 selected_unit_close_rect = _draw_selected_object_panel(
+                    _PANEL_DRAW_HELPERS,
+                    _PANEL_COLORS,
                     screen,
                     small,
                     tiny,
@@ -3130,6 +2658,8 @@ def run_viewer() -> None:
             elif selected_resource is not None:
                 resource_kind = "horses" if selected_resource.resource_type == "horses" else "stone" if selected_resource.resource_type == "stone" else "resource"
                 selected_unit_close_rect = _draw_selected_object_panel(
+                    _PANEL_DRAW_HELPERS,
+                    _PANEL_COLORS,
                     screen,
                     small,
                     tiny,
@@ -3139,7 +2669,7 @@ def run_viewer() -> None:
                     inspect_rect,
                     title=RESOURCE_LABELS.get(selected_resource.resource_type, selected_resource.resource_type.title()),
                     subtitle="Map resource",
-                    lines=_selected_resource_lines(selected_resource)[1:],
+                    lines=_selected_resource_lines(_PANEL_TEXT, selected_resource)[1:],
                     icon_kind=resource_kind,
                     accent=(136, 170, 102),
                 )
@@ -3160,9 +2690,11 @@ def run_viewer() -> None:
                     board_backdrop.x + 18,
                     board_backdrop.y + 292,
                     300,
-                    _human_action_panel_height(tiny, panel_options, panel_hint),
+                    _human_action_panel_height(_PANEL_DRAW_HELPERS, tiny, panel_options, panel_hint),
                 )
                 human_action_button_rects = _draw_human_action_panel(
+                    _PANEL_DRAW_HELPERS,
+                    _PANEL_COLORS,
                     screen,
                     small,
                     tiny,
@@ -3182,7 +2714,7 @@ def run_viewer() -> None:
             _draw_text_block(
                 screen,
                 tiny,
-                ["Debug: D  Snapshot: P  Tech tree: T  Gather: G  Reset: R  Wheel zoom  Middle click reset"],
+                ["Debug: D  Snapshot: P  Tech tree: T  Gather: G  Reset: R  Space: next turn  Tab: next faction  Wheel zoom"],
                 debug_rect.x + 10,
                 debug_rect.y + 7,
                 TEXT_MUTED,
@@ -3190,9 +2722,11 @@ def run_viewer() -> None:
             )
 
         tech_tree_node_rects = {}
+        tech_tree_close_rect = pygame.Rect(0, 0, 0, 0)
         if show_tech_tree:
             overlay_rect = pygame.Rect(pad * 2, pad * 2, width_px - pad * 4, height_px - pad * 4)
-            tech_tree_node_rects = _draw_tech_tree_overlay(
+            tech_tree_result = _draw_tech_tree_overlay(
+                _RESEARCH_DRAW_HELPERS,
                 screen,
                 font,
                 tiny,
@@ -3202,7 +2736,11 @@ def run_viewer() -> None:
                 current_faction,
                 human_turn_active,
                 mouse_pos,
+                scroll_y=tech_tree_scroll,
+                pan_x=tech_tree_pan_x,
             )
+            tech_tree_node_rects = tech_tree_result.node_rects
+            tech_tree_close_rect = tech_tree_result.close_rect
 
         pygame.display.flip()
 
