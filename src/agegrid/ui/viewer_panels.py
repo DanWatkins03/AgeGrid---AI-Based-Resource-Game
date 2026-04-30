@@ -118,7 +118,7 @@ def draw_selected_unit_panel(
 
     close_rect = helpers.draw_parchment_close_button(surface, board_assets, pygame.Rect(inner.right - 26, inner.y + 6, 22, 22))
 
-    icon_center = (inner.x + 38, inner.y + 38)
+    icon_center = (inner.x + 38, inner.y + 44)
     pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
     if not helpers.draw_unit_sprite(
         surface,
@@ -139,22 +139,23 @@ def draw_selected_unit_panel(
         )
 
     unit_name = text.unit_labels.get(unit.unit_type, unit.unit_type.replace("_", " ").title())
-    helpers.draw_shadow_text(surface, title_font, unit_name, inner.x + 72, inner.y + 10, colors.parch_title, shadow=colors.parch_shadow, shadow_offset=0)
+    title_x = inner.x + 78
+    helpers.draw_shadow_text(surface, title_font, unit_name, title_x, inner.y + 16, colors.parch_title, shadow=colors.parch_shadow, shadow_offset=0)
     helpers.draw_shadow_text(
         surface,
         body_font,
         f"{unit.faction} #{unit.id}",
-        inner.x + 72,
-        inner.y + 36,
+        title_x,
+        inner.y + 42,
         accent,
         shadow=colors.parch_shadow,
         shadow_offset=0,
     )
-    pygame.draw.line(surface, colors.parch_line, (inner.x + 12, inner.y + 64), (inner.right - 12, inner.y + 64), 1)
+    pygame.draw.line(surface, colors.parch_line, (inner.x + 12, inner.y + 72), (inner.right - 12, inner.y + 72), 1)
 
     spec = production.unit_stats(env, unit.faction, unit.unit_type)
     max_hp = spec.hp if spec is not None else unit.hp
-    health_rect = pygame.Rect(inner.x + 14, inner.y + 84, inner.width - 28, 24)
+    health_rect = pygame.Rect(inner.x + 14, inner.y + 92, inner.width - 28, 24)
     helpers.draw_shadow_text(surface, body_font, f"Health {unit.hp}/{max_hp}", health_rect.x, health_rect.y - 18, colors.parch_muted, shadow=colors.parch_shadow, shadow_offset=0)
     helpers.draw_ui_meter(surface, board_assets, health_rect, unit.hp, max_hp, color_family="red")
 
@@ -206,24 +207,25 @@ def draw_selected_object_panel(
 
     close_rect = helpers.draw_parchment_close_button(surface, board_assets, pygame.Rect(inner.right - 26, inner.y + 6, 22, 22))
 
-    icon_center = (inner.x + 38, inner.y + 38)
+    icon_center = (inner.x + 38, inner.y + 44)
     pygame.draw.circle(surface, (*accent, 48), icon_center, 24)
     drew_icon = False
     if icon_kind is not None:
         sprite = board_assets.object_sprite(icon_kind)
         if sprite is not None:
-            scaled = pygame.transform.smoothscale(sprite, (36, 36))
+            scaled = pygame.transform.smoothscale(sprite, (34, 34))
             screen_rect = scaled.get_rect(center=(icon_center[0], icon_center[1] + 2))
             surface.blit(scaled, screen_rect)
             drew_icon = True
     if not drew_icon and icon_drawer is not None:
         icon_drawer(icon_center)
 
-    helpers.draw_shadow_text(surface, title_font, title, inner.x + 72, inner.y + 10, colors.parch_title, shadow=colors.parch_shadow, shadow_offset=0)
-    helpers.draw_shadow_text(surface, body_font, subtitle, inner.x + 72, inner.y + 36, accent, shadow=colors.parch_shadow, shadow_offset=0)
-    pygame.draw.line(surface, colors.parch_line, (inner.x + 12, inner.y + 64), (inner.right - 12, inner.y + 64), 1)
+    title_x = inner.x + 78
+    helpers.draw_shadow_text(surface, title_font, title, title_x, inner.y + 16, colors.parch_title, shadow=colors.parch_shadow, shadow_offset=0)
+    helpers.draw_shadow_text(surface, body_font, subtitle, title_x, inner.y + 42, accent, shadow=colors.parch_shadow, shadow_offset=0)
+    pygame.draw.line(surface, colors.parch_line, (inner.x + 12, inner.y + 72), (inner.right - 12, inner.y + 72), 1)
 
-    body_y = inner.y + 84
+    body_y = inner.y + 92
     if hp_value is not None and hp_max is not None:
         health_rect = pygame.Rect(inner.x + 14, body_y, inner.width - 28, 24)
         helpers.draw_shadow_text(surface, body_font, f"Health {hp_value}/{hp_max}", health_rect.x, health_rect.y - 18, colors.parch_muted, shadow=colors.parch_shadow, shadow_offset=0)
@@ -250,7 +252,12 @@ def draw_hover_tile_panel(
     if not lines:
         return
     inner = helpers.draw_parchment_panel_frame(surface, board_assets, rect, panel_key="panel_beigeLight", inset_key="panelInset_beigeLight")
-    y = helpers.draw_parchment_header(surface, title_font, body_font, inner, lines[0])
+    title = lines[0]
+    title_y = inner.y + 8
+    helpers.draw_shadow_text(surface, title_font, title, inner.x + 12, title_y, colors.parch_title, shadow=colors.parch_shadow, shadow_offset=0)
+    divider_y = title_y + title_font.get_height() + 8
+    pygame.draw.line(surface, colors.parch_line, (inner.x + 10, divider_y), (inner.right - 10, divider_y), 1)
+    y = divider_y + 10
     wrapped: list[str] = []
     for line in lines[1:]:
         wrapped.extend(helpers.wrap_lines(line, body_font, inner.width - 16))

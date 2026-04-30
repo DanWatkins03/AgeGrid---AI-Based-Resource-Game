@@ -227,6 +227,16 @@ class ProductionSystemTests(unittest.TestCase):
         self.assertEqual(env.resources[0].remaining, 60)
         self.assertEqual(env.bank["Red"], 255)
 
+    def test_building_cannot_be_placed_directly_on_resource_tile(self) -> None:
+        env = make_env(num_resource_nodes=0)
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        env.faction_state("Red").techs_unlocked.add("mining")
+        worker.position = (3, 2)
+        env.resources = [ResourceNode(id=1, position=(3, 1), remaining=60, resource_type="ore")]
+
+        self.assertFalse(production.can_build(env, "Red", worker.id, "storehouse", (3, 1)))
+        self.assertFalse(production.build(env, "Red", worker.id, "storehouse", (3, 1)))
+
     def test_quarry_requires_visible_stone_resource(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
         env.faction_state("Red").techs_unlocked.update({"mining", "masonry"})

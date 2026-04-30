@@ -322,6 +322,8 @@ def can_build(env, faction: str, worker_id: int, building_type: str, pos: Positi
         return False
     if not env._in_bounds(pos) or pos in env._occupied_positions() or pos in {b.position for b in env.buildings}:
         return False
+    if env.resource_at(pos) is not None:
+        return False
     if spec.required_resource_adjacent is not None:
         adjacent_resources = [env.resource_at_for_faction(neighbor, faction) for neighbor in hexgrid.neighbors(pos)]
         if not any(

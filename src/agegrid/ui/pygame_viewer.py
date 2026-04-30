@@ -1564,13 +1564,18 @@ def _board_origin_for_layout(
 
 def _hover_panel_rect(
     surface: pygame.Surface,
+    title_font: pygame.font.Font,
     body_font: pygame.font.Font,
     tile_rect: pygame.Rect,
     lines: list[str],
 ) -> pygame.Rect:
-    line_height = 16
-    width = 210
-    height = 40 + max(1, len(lines) - 1) * line_height
+    line_height = 18
+    width = 224
+    wrapped_lines = 0
+    for line in lines[1:]:
+        wrapped_lines += max(1, len(_wrap_lines(line, body_font, width - 34)))
+    inner_height = 8 + title_font.get_height() + 8 + 10 + max(1, wrapped_lines) * line_height + 10
+    height = max(88, inner_height + 36)
     x = tile_rect.right + 10
     y = tile_rect.y - 4
     if x + width > surface.get_width() - 8:
@@ -2523,39 +2528,41 @@ def run_viewer() -> None:
             pygame.draw.rect(screen, color, hp_chip, width=2, border_radius=10)
             _draw_shadow_text(screen, tiny, str(base.hp), hp_chip.x + 10, hp_chip.y + 2, TEXT_PRIMARY, shadow=(8, 10, 14), shadow_offset=1)
 
-            for b in env.buildings:
-                color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
-                center = _hex_center(b.position[0], b.position[1], board_origin)
+        for b in env.buildings:
+            color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
+            center = _hex_center(b.position[0], b.position[1], board_origin)
 
-                building_scale = max(24, int(HEX_SIZE * 1.4))
-                building_rect_size = max(20, int(HEX_SIZE * 1.15))
-                building_shadow_w = max(20, int(HEX_SIZE * 1.35))
-                building_shadow_h = max(8, int(HEX_SIZE * 0.5))
-                building_offset_y = int(HEX_SIZE * 0.64)
+            # Keep buildings grounded lower in the hex than units/resources so they
+            # read as placed structures rather than floating markers.
+            building_scale = max(22, int(HEX_SIZE * 1.22))
+            building_rect_size = max(18, int(HEX_SIZE * 1.02))
+            building_shadow_w = max(18, int(HEX_SIZE * 1.18))
+            building_shadow_h = max(7, int(HEX_SIZE * 0.42))
+            building_offset_y = int(HEX_SIZE * 0.56)
 
-                rect = pygame.Rect(
-                    center[0] - building_rect_size // 2,
-                    center[1] - int(HEX_SIZE * 0.7),
-                    building_rect_size,
-                    building_rect_size,
-                )
+            rect = pygame.Rect(
+                center[0] - building_rect_size // 2,
+                center[1] - int(HEX_SIZE * 0.56),
+                building_rect_size,
+                building_rect_size,
+            )
 
-                _draw_soft_shadow(
-                    screen,
-                    (center[0], center[1] + building_offset_y - 2),
-                    building_shadow_w,
-                    building_shadow_h,
-                    alpha=70,
-                )
-                _draw_asset_marker(
-                    screen,
-                    board_assets.object_sprite(b.building_type),
-                    center,
-                    lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
-                    tint=color,
-                    scale=(building_scale, building_scale),
-                    offset_y=building_offset_y,
-                )
+            _draw_soft_shadow(
+                screen,
+                (center[0], center[1] + building_offset_y + 1),
+                building_shadow_w,
+                building_shadow_h,
+                alpha=58,
+            )
+            _draw_asset_marker(
+                screen,
+                board_assets.object_sprite(b.building_type),
+                center,
+                lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
+                tint=color,
+                scale=(building_scale, building_scale),
+                offset_y=building_offset_y,
+            )
 
         for u in env.units:
             cx, cy = _hex_center(u.position[0], u.position[1], board_origin)
@@ -2588,7 +2595,7 @@ def run_viewer() -> None:
             hover_lines = _hover_tile_lines(env, hover_pos)
             if hover_lines:
                 tile_rect = _hex_bounds(hover_pos[0], hover_pos[1], board_origin)
-                hover_rect = _hover_panel_rect(screen, tiny, tile_rect, hover_lines)
+                hover_rect = _hover_panel_rect(screen, small, tiny, tile_rect, hover_lines)
                 _draw_hover_tile_panel(_PANEL_DRAW_HELPERS, _PANEL_COLORS, screen, small, tiny, board_assets, hover_rect, hover_lines)
 
         if selected_unit is None:
