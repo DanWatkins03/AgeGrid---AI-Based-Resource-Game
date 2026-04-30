@@ -8,6 +8,7 @@ from typing import Iterator, MutableMapping
 class FactionState:
     name: str
     resources: int = 0
+    war_support: int = 100
     techs_unlocked: set[str] = field(default_factory=set)
     tech_in_progress: str | None = None
     research_points: int = 0
@@ -20,8 +21,10 @@ class RelationState:
     state: str = "peace"  # peace, war, truce
     since_turn: int = 0
     truce_until_turn: int = 0
+    aggressor: str | None = None
     pending_peace_by: str | None = None
     pending_indemnity: int = 0
+    war_score: dict[str, int] = field(default_factory=dict)
 
 
 class BankView(MutableMapping[str, int]):

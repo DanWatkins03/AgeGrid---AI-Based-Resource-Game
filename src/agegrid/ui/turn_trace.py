@@ -36,6 +36,7 @@ class FactionTurnInfo:
     last_action: str = "-"
     research: str = "-"
     attacks: str = "-"
+    turn_number: int = 0
 
 
 @dataclass
@@ -78,7 +79,13 @@ def _format_action(action: tuple | None) -> str:
     return str(action)
 
 
-def build_turn_info(label: str, actions: list[tuple | None], log: list[str], events: list[str]) -> FactionTurnInfo:
+def build_turn_info(
+    label: str,
+    actions: list[tuple | None],
+    log: list[str],
+    events: list[str],
+    turn_number: int = 0,
+) -> FactionTurnInfo:
     research = next((_format_action(action) for action in actions if action and action[0] == "research"), "-")
     attacks = next(
         (_format_action(action) for action in actions if action and action[0] in {"attack", "attack_base"}),
@@ -90,6 +97,7 @@ def build_turn_info(label: str, actions: list[tuple | None], log: list[str], eve
         last_action=events[-1] if events else (_format_action(actions[-1]) if actions else "stop"),
         research=research,
         attacks=attacks,
+        turn_number=turn_number,
     )
 
 
@@ -103,7 +111,11 @@ def step_faction_with_trace(env: AgeGridEnv, agent) -> tuple[FactionTurnInfo, li
 
     faction = env.factions[env.current_player]
     log = env.step_faction(decide)
-    return build_turn_info(faction, actions, log, list(env.current_events)), actions
+    return build_turn_info(faction, actions, log, list(env.current_events), env.turn + 1), actions
+
+
+def turn_snapshot(env: AgeGridEnv, red_info: FactionTurnInfo, blue_info: FactionTurnInfo) -> TurnSnapshot:
+    return TurnSnapshot(red_info.turn_number or env.turn + 1, red_info, blue_info)
 
 
 def step_full_turn(

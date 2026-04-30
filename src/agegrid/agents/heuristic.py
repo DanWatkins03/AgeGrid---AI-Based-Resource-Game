@@ -238,7 +238,8 @@ def heuristic_diagnostics_label(env: AgeGridEnv, faction: str) -> str:
     state = "Recovery" if diagnostics.recovery else "Behind" if diagnostics.behind else "Stable"
     return (
         f"{state} | tech gap {diagnostics.tech_deficit} "
-        f"econ gap {diagnostics.economy_gap} mil gap {diagnostics.military_gap}"
+        f"econ gap {diagnostics.economy_gap} mil gap {diagnostics.military_gap} "
+        f"support {env.faction_state(faction).war_support}"
     )
 
 
@@ -533,7 +534,7 @@ def _resource_positions(env: AgeGridEnv, resource_type: str) -> set[tuple[int, i
     return {
         resource.position
         for resource in env.resources
-        if resource.remaining > 0 and resource.resource_type == resource_type
+        if resource.abundance > 0 and resource.resource_type == resource_type
     }
 
 
@@ -1038,32 +1039,54 @@ class HeuristicAgent:
 
     def _choose_diplomacy_action(self, env: AgeGridEnv, ctx: _Context) -> Action | None:
         relation = env.relation_state(ctx.faction, ctx.enemy_faction)
+        war_support = env.faction_state(ctx.faction).war_support
+        enemy_support = env.faction_state(ctx.enemy_faction).war_support
+        direct_siege = bool(_base_camp_targets(env, ctx.faction)) or ctx.base_under_siege
+        imminent_base_loss = _enemy_can_finish_base_next_turn(env, ctx.faction)
         if ctx.accept_peace_actions:
             losing_war = (
                 ctx.home_enemy_force > ctx.home_friendly_force
                 or len(ctx.military) < max(1, len([u for u in env.units if u.faction == ctx.enemy_faction and u.attack_damage > 0]) // 2)
                 or env.bank[ctx.faction] < env.bank[ctx.enemy_faction] // 2
+                or war_support <= 35
             )
-            if losing_war and not ctx.siege_finish:
+            if losing_war and not ctx.siege_finish and not direct_siege and not imminent_base_loss:
                 return ctx.accept_peace_actions[0]
         if ctx.offer_peace_actions:
             war_turns = env.turn - relation.since_turn
+            losing_score = env.war_score(ctx.faction, ctx.enemy_faction) <= env.war_score(ctx.enemy_faction, ctx.faction)
             if (
                 war_turns >= env.config.min_war_duration
-                and (ctx.last_stand or ctx.rebuild_mode)
-                and not ctx.base_under_siege
-                and not _enemy_can_finish_base_next_turn(env, ctx.faction)
+                and (ctx.last_stand or ctx.rebuild_mode or war_support <= 45 or losing_score)
+                and not direct_siege
+                and not imminent_base_loss
             ):
                 return ctx.offer_peace_actions[0]
         if ctx.declare_war_actions:
             if ctx.in_truce:
                 return None
-            ready_force = len(ctx.military) >= 2 and (_total_force(env, ctx.faction) >= _total_force(env, ctx.enemy_faction) or len(ctx.military) >= 4)
-            border_pressure = any(
+            frontier_pressure = any(
                 _distance(unit.position, env.bases[ctx.enemy_faction].position) <= 6
                 for unit in ctx.military
             )
-            if ready_force and (ctx.push_mode or ctx.siege_finish or border_pressure):
+            enemy_incursion = any(
+                _distance(unit.position, env.bases[ctx.faction].position) <= 6
+                for unit in env.units
+                if unit.faction == ctx.enemy_faction and unit.attack_damage > 0
+            )
+            support_floor = env.config.war_support_to_declare_min
+            if not (frontier_pressure or enemy_incursion or ctx.push_mode or ctx.siege_finish):
+                support_floor += 10
+            if war_support < support_floor:
+                return None
+            if env.bank[ctx.faction] < env.config.war_declaration_cost + env.config.war_upkeep_per_turn * 3:
+                return None
+            ready_force = len(ctx.military) >= 2 and (
+                _total_force(env, ctx.faction) >= _total_force(env, ctx.enemy_faction)
+                or len(ctx.military) >= 4
+            )
+            defensive_declare = enemy_incursion and len(ctx.military) >= 2 and war_support >= env.config.war_support_to_declare_min
+            if (ready_force and (ctx.push_mode or ctx.siege_finish or frontier_pressure)) or defensive_declare:
                 return ctx.declare_war_actions[0]
         return None
 

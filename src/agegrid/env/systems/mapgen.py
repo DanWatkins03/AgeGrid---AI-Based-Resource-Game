@@ -8,7 +8,7 @@ Position = Tuple[int, int]
 def _place_symmetric_resource_group(
     env,
     n: int,
-    remaining: int,
+    abundance: int,
     rid_start: int,
     used: set[Position],
     resource_type: str,
@@ -42,7 +42,7 @@ def _place_symmetric_resource_group(
             ResourceNode(
                 id=rid,
                 position=p1,
-                remaining=remaining,
+                abundance=abundance,
                 resource_type=resource_type,
                 required_tech=required_tech,
             )
@@ -52,7 +52,7 @@ def _place_symmetric_resource_group(
             ResourceNode(
                 id=rid,
                 position=p2,
-                remaining=remaining,
+                abundance=abundance,
                 resource_type=resource_type,
                 required_tech=required_tech,
             )
@@ -65,18 +65,18 @@ def _place_symmetric_resource_group(
     return resources, rid
 
 
-def place_symmetric_resources(env, n: int, remaining: int) -> List[ResourceNode]:
+def place_symmetric_resources(env, n: int, abundance: int) -> List[ResourceNode]:
     forbidden = {env.bases["Red"].position, env.bases["Blue"].position}
     used: set[Position] = set(forbidden)
-    resources, next_rid = _place_symmetric_resource_group(env, n, remaining, 1, used, "ore")
+    resources, next_rid = _place_symmetric_resource_group(env, n, abundance, 1, used, "ore")
 
     stone_nodes = getattr(env.config, "stone_resource_nodes", 0)
-    stone_remaining = getattr(env.config, "stone_resource_amount", remaining)
+    stone_abundance = getattr(env.config, "stone_resource_amount", abundance)
     if stone_nodes > 0:
         stone_resources, next_rid = _place_symmetric_resource_group(
             env,
             stone_nodes,
-            stone_remaining,
+            stone_abundance,
             next_rid,
             used,
             "stone",
@@ -85,12 +85,12 @@ def place_symmetric_resources(env, n: int, remaining: int) -> List[ResourceNode]
         resources.extend(stone_resources)
 
     horse_nodes = getattr(env.config, "horse_resource_nodes", 0)
-    horse_remaining = getattr(env.config, "horse_resource_amount", remaining)
+    horse_abundance = getattr(env.config, "horse_resource_amount", abundance)
     if horse_nodes > 0:
         horse_resources, next_rid = _place_symmetric_resource_group(
             env,
             horse_nodes,
-            horse_remaining,
+            horse_abundance,
             next_rid,
             used,
             "horses",

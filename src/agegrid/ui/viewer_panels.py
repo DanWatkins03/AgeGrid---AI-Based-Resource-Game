@@ -59,18 +59,28 @@ def selected_unit_lines(text: PanelText, env: AgeGridEnv, unit) -> list[str]:
         f"ATK {unit.attack_damage}  RNG {unit.attack_range}  MOVE {move_steps}",
         f"Position {unit.position[0]}, {unit.position[1]}",
     ]
+    if unit.unit_type == "worker":
+        resource = env.resource_at_for_faction(unit.position, unit.faction)
+        if resource is None:
+            extras.append("Gather: stand on a resource tile")
+        elif env.can_gather_resource(unit, resource):
+            extras.append("Gather: available from infinite source")
+        else:
+            extras.append("Gather blocked: resource contested")
     return [label, *extras]
 
 
-def selected_resource_lines(text: PanelText, resource) -> list[str]:
+def selected_resource_lines(text: PanelText, resource, env: AgeGridEnv | None = None, faction: str | None = None) -> list[str]:
     label = text.resource_labels.get(resource.resource_type, resource.resource_type.title())
     help_text = text.resource_help.get(resource.resource_type, "Strategic resource node.")
     extra = "Visible once its required tech is unlocked." if resource.required_tech else "Available to gather immediately."
+    access = "Contested by enemy military" if env is not None and faction is not None and env.resource_is_contested(resource, faction) else "Infinite source"
     return [
         label,
         help_text,
         extra,
-        f"Remaining {resource.remaining}",
+        access,
+        f"Abundance {resource.abundance}",
     ]
 
 

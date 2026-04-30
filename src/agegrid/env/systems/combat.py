@@ -42,6 +42,7 @@ def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
 
     target.hp -= attacker.attack_damage
     if target.hp <= 0:
+        env.record_unit_casualty(attacker.faction, target.faction, target.unit_type)
         env._remove_unit(target.id)
 
     return True
@@ -68,7 +69,9 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
     if distance > attacker.attack_range:
         return False
 
+    damage = min(attacker.attack_damage, target_base.hp)
     target_base.hp = max(0, target_base.hp - attacker.attack_damage)
+    env.record_base_damage(attacker.faction, target_faction, damage)
     return True
 
 
@@ -94,6 +97,7 @@ def resolve_defensive_fire(env, faction: str) -> list[str]:
             target = min(targets, key=lambda unit: _structure_target_priority(base.position, unit))
             target.hp -= base_damage
             if target.hp <= 0:
+                env.record_unit_casualty(faction, target.faction, target.unit_type)
                 env._remove_unit(target.id)
                 events.append(f"{faction} base shot down {target.faction} {target.unit_type}#{target.id}")
             else:
@@ -111,6 +115,7 @@ def resolve_defensive_fire(env, faction: str) -> list[str]:
         target = min(current_targets, key=lambda unit: _structure_target_priority(building.position, unit))
         target.hp -= building_damage
         if target.hp <= 0:
+            env.record_unit_casualty(faction, target.faction, target.unit_type)
             env._remove_unit(target.id)
             events.append(
                 f"{faction} {building.building_type} shot down {target.faction} {target.unit_type}#{target.id}"

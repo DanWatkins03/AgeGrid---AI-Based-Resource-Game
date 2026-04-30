@@ -60,6 +60,7 @@ from src.agegrid.ui.turn_trace import (
     build_turn_info,
     step_faction_with_trace,
     step_full_turn,
+    turn_snapshot,
     write_debug_snapshot,
 )
 
@@ -119,6 +120,7 @@ GRID_ALT = (28, 35, 43)
 GRID_LINE = (61, 72, 84)
 GRID_HOVER = (188, 214, 234)
 RESOURCE_GLOW = (109, 192, 116)
+RESOURCE_CONTESTED = (226, 86, 76)
 HEX_HOVER_FILL = (176, 206, 230)
 HEX_SELECT_FILL = (245, 216, 120)
 HEX_SELECT_LINE = (250, 234, 167)
@@ -241,7 +243,19 @@ def _can_human_gather(env: AgeGridEnv, unit, moved_units: set[int]) -> bool:
         return False
     if env.actions_left <= 0 or env.attempts_left <= 0:
         return False
-    return env.resource_at_for_faction(unit.position, unit.faction) is not None
+    resource = env.resource_at_for_faction(unit.position, unit.faction)
+    return resource is not None and env.can_gather_resource(unit, resource)
+
+
+def _human_gather_block_reason(env: AgeGridEnv, unit) -> str | None:
+    if unit is None or unit.unit_type != "worker":
+        return "Select a worker."
+    resource = env.resource_at_for_faction(unit.position, unit.faction)
+    if resource is None:
+        return "Stand on a resource tile."
+    if not env.can_gather_resource(unit, resource):
+        return "Resource contested by enemy military."
+    return None
 
 
 def _human_build_targets(env: AgeGridEnv, worker, building_type: str) -> list[tuple[int, int]]:
@@ -345,8 +359,8 @@ def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected
     if selected_unit is not None and selected_unit.faction == faction:
         if selected_unit.unit_type == "worker":
             gather_reason = _turn_budget_reason(env)
-            if gather_reason is None and env.resource_at_for_faction(selected_unit.position, selected_unit.faction) is None:
-                gather_reason = "Stand on a resource tile."
+            if gather_reason is None:
+                gather_reason = _human_gather_block_reason(env, selected_unit)
             options.append(
                 HumanActionOption(
                     label="Gather",
@@ -431,7 +445,7 @@ def _advance_until_human_or_end(
 
         env.step_end_turn()
         if env.current_player == 0:
-            completed_rounds.append(TurnSnapshot(env.turn, red_info, blue_info))
+            completed_rounds.append(turn_snapshot(env, red_info, blue_info))
 
     return red_info, blue_info, completed_rounds, effects
 
@@ -454,7 +468,7 @@ def _step_ai_faction(
     else:
         blue_info = info
     env.step_end_turn()
-    snapshot = TurnSnapshot(env.turn, red_info, blue_info) if env.current_player == 0 else None
+    snapshot = turn_snapshot(env, red_info, blue_info) if env.current_player == 0 else None
     return red_info, blue_info, snapshot, effects
 
 
@@ -924,15 +938,21 @@ def _draw_status_badge(
     _draw_shadow_text(surface, font, text, badge.x + 10, badge.y + 3, text_color, shadow=(14, 16, 20), shadow_offset=1)
 
 
+def _contested_resource_count(env: AgeGridEnv, faction: str) -> int:
+    return sum(1 for resource in env.visible_resources(faction) if env.resource_is_contested(resource, faction))
+
+
 def _tactical_panel_lines(env: AgeGridEnv, faction: str) -> list[str]:
     composition = unit_composition(env, faction)
     mode = "Defense" if defense_mode_active(env, faction) else "Push" if push_mode_active(env, faction) else "Field"
     enemy = next(name for name in env.factions if name != faction)
     relation = env.relation_state(faction, enemy).state.title()
+    contested = _contested_resource_count(env, faction)
     return [
         f"Diplomacy {relation}",
         f"Threat {threat_level(env, faction)}",
         f"Plan {army_plan(env, faction)} | {mode}",
+        f"Resources {contested} contested",
         f"Army W{composition['worker']} S{composition['soldier']} A{composition['archer']} H{composition['horseman']}",
     ]
 
@@ -979,9 +999,11 @@ def _draw_tactical_panel(
                 line_color = _relation_color(line.removeprefix("Diplomacy ").strip())
             elif line.startswith("Threat "):
                 threat_text = line.removeprefix("Threat ").strip().lower()
-                line_color = PARCH_DANGER if threat_text == "emergency" else PARCH_WARN if threat_text == "rising" else PARCH_BODY
+                line_color = PARCH_DANGER if threat_text == "emergency" else PARCH_WARN if threat_text == "guarded" else PARCH_BODY
             elif line.startswith("Plan "):
                 line_color = PARCH_INFO
+            elif line.startswith("Resources ") and not line.startswith("Resources 0 "):
+                line_color = PARCH_DANGER
             elif line.startswith("Army "):
                 line_color = PARCH_MUTED
             _draw_text_block(surface, body_font, wrapped, block_rect.x + 10, line_y, line_color, 18)
@@ -1481,7 +1503,7 @@ def _terrain_kind(env: AgeGridEnv, pos: tuple[int, int]) -> str:
         return "stone"
     if any(building.position == pos and building.hp > 0 for building in env.buildings):
         return "dirt"
-    resource = next((r for r in env.resources if r.position == pos and r.remaining > 0), None)
+    resource = next((r for r in env.resources if r.position == pos and r.abundance > 0), None)
     if resource is None:
         return "grass" if (pos[0] + pos[1]) % 4 else "dirt"
     if resource.resource_type == "stone":
@@ -1489,6 +1511,10 @@ def _terrain_kind(env: AgeGridEnv, pos: tuple[int, int]) -> str:
     if resource.resource_type == "horses":
         return "sand"
     return "grass"
+
+
+def _resource_contest_labels(env: AgeGridEnv, resource) -> list[str]:
+    return [faction for faction in env.factions if env.resource_is_contested(resource, faction)]
 
 
 def _draw_asset_marker(
@@ -1536,11 +1562,17 @@ def _hover_tile_lines(env: AgeGridEnv, pos: tuple[int, int]) -> list[str]:
     if base is not None:
         faction = next(name for name, current_base in env.bases.items() if current_base is base)
         return [f"{faction} Base", f"HP {base.hp}"]
-    resource = next((r for r in env.resources if r.position == pos and r.remaining > 0), None)
+    resource = next((r for r in env.resources if r.position == pos and r.abundance > 0), None)
     if resource is not None:
         label = "Horse Herd" if resource.resource_type == "horses" else "Stone Deposit" if resource.resource_type == "stone" else "Ore Vein"
         detail = "Unlocks horseback riding and cavalry" if resource.resource_type == "horses" else "Unlocks quarry, walls, and stronger structures" if resource.resource_type == "stone" else "Gatherable resource"
-        return [label, detail]
+        contest_labels = _resource_contest_labels(env, resource)
+        access = (
+            f"Contested for {', '.join(contest_labels)}"
+            if contest_labels
+            else "Infinite source"
+        )
+        return [label, detail, access]
     return []
 
 
@@ -1616,6 +1648,49 @@ def _effects_from_actions(
                 effects.append(VisualEffect("gather", 34, 34, RESOURCE_GLOW, pos=unit.position, label="+"))
         elif kind == "research":
             effects.append(VisualEffect("banner", 42, 42, accent, label=f"{faction}: {action[1]}"))
+        elif kind == "declare_war":
+            target = action[1]
+            effects.append(
+                VisualEffect(
+                    "banner",
+                    74,
+                    74,
+                    RED_PRIMARY,
+                    label=(
+                        f"{faction} declared war on {target}  "
+                        f"(-${env.config.war_declaration_cost}, support {env.faction_state(faction).war_support})"
+                    ),
+                )
+            )
+        elif kind == "offer_peace":
+            target = action[1]
+            indemnity = int(action[2])
+            effects.append(
+                VisualEffect(
+                    "banner",
+                    64,
+                    64,
+                    PARCH_WARN,
+                    label=f"{faction} offered peace to {target}  (${indemnity})",
+                )
+            )
+        elif kind == "accept_peace":
+            target = action[1]
+            relation = env.relation_state(faction, target)
+            detail = next(
+                (
+                    event
+                    for event in reversed(env.current_events)
+                    if event.startswith(f"{faction} accepted peace with {target}")
+                ),
+                None,
+            )
+            label = (
+                detail
+                if detail is not None
+                else f"{faction} accepted peace with {target}  (truce {relation.truce_until_turn - env.turn} turns)"
+            )
+            effects.append(VisualEffect("banner", 90, 90, PARCH_GOOD, label=label))
         elif kind == "build":
             effects.append(VisualEffect("build", 40, 40, accent, pos=action[3], label=action[2].title()))
         elif kind == "train":
@@ -1663,11 +1738,13 @@ def _draw_effects(
         alpha = max(40, min(220, int(220 * progress)))
         color = effect.color
         if effect.kind == "banner":
-            banner = pygame.Surface((340, 42), pygame.SRCALPHA)
+            text = font.render(effect.label, True, (244, 246, 248))
+            banner_width = max(340, min(screen.get_width() - 40, text.get_width() + 44))
+            banner = pygame.Surface((banner_width, 42), pygame.SRCALPHA)
             pygame.draw.rect(banner, (15, 20, 27, min(230, alpha + 20)), banner.get_rect(), border_radius=12)
             pygame.draw.rect(banner, (*color, alpha), banner.get_rect(), width=2, border_radius=12)
-            screen.blit(banner, (screen.get_width() // 2 - 150, 14))
-            text = font.render(effect.label, True, (244, 246, 248))
+            banner_x = screen.get_width() // 2 - banner_width // 2
+            screen.blit(banner, (banner_x, 14))
             screen.blit(text, (screen.get_width() // 2 - text.get_width() // 2, 26))
             continue
         if effect.pos is None:
@@ -2013,7 +2090,7 @@ def run_viewer() -> None:
                     if env.winner() is None:
                         if not has_human_players:
                             red_info, blue_info, red_actions, blue_actions = step_full_turn(env, red_agent, blue_agent)
-                            turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                            turn_history.append(turn_snapshot(env, red_info, blue_info))
                             effects.extend(_effects_from_actions(env, red_actions, "Red"))
                             effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                         else:
@@ -2023,6 +2100,7 @@ def run_viewer() -> None:
                                     human_turn_actions,
                                     human_turn_log or ["stop"],
                                     list(env.current_events),
+                                    env.turn + 1,
                                 )
                                 if current_faction == "Red":
                                     red_info = completed_info
@@ -2036,7 +2114,7 @@ def run_viewer() -> None:
                                 pending_build_type = None
                                 env.step_end_turn()
                                 if env.current_player == 0:
-                                    turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                                    turn_history.append(turn_snapshot(env, red_info, blue_info))
 
                             red_info, blue_info, new_rounds, new_effects = _advance_until_human_or_end(
                                 env,
@@ -2139,7 +2217,7 @@ def run_viewer() -> None:
                 if btn_rect.collidepoint(event.pos) and env.winner() is None:
                     if not has_human_players:
                         red_info, blue_info, red_actions, blue_actions = step_full_turn(env, red_agent, blue_agent)
-                        turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                        turn_history.append(turn_snapshot(env, red_info, blue_info))
                         effects.extend(_effects_from_actions(env, red_actions, "Red"))
                         effects.extend(_effects_from_actions(env, blue_actions, "Blue"))
                     else:
@@ -2149,6 +2227,7 @@ def run_viewer() -> None:
                                 human_turn_actions,
                                 human_turn_log or ["stop"],
                                 list(env.current_events),
+                                env.turn + 1,
                             )
                             if current_faction == "Red":
                                 red_info = completed_info
@@ -2162,7 +2241,7 @@ def run_viewer() -> None:
                             pending_build_type = None
                             env.step_end_turn()
                             if env.current_player == 0:
-                                turn_history.append(TurnSnapshot(env.turn, red_info, blue_info))
+                                turn_history.append(turn_snapshot(env, red_info, blue_info))
 
                         red_info, blue_info, new_rounds, new_effects = _advance_until_human_or_end(
                             env,
@@ -2483,6 +2562,20 @@ def run_viewer() -> None:
                 alpha=60,
             )
 
+            contest_labels = _resource_contest_labels(env, r)
+            ring_center = (center[0], center[1] + max(4, resource_offset_y // 2))
+            if contest_labels:
+                pulse = (pygame.time.get_ticks() // 220) % 2
+                ring_radius = max(15, int(HEX_SIZE * (0.62 + 0.08 * pulse)))
+                pygame.draw.circle(screen, RESOURCE_CONTESTED, ring_center, ring_radius, width=4)
+                pygame.draw.circle(screen, (255, 226, 170), ring_center, max(8, ring_radius - 7), width=2)
+                badge_rect = pygame.Rect(ring_center[0] + ring_radius - 5, ring_center[1] - ring_radius - 4, 20, 20)
+                pygame.draw.rect(screen, (68, 28, 26), badge_rect, border_radius=9)
+                pygame.draw.rect(screen, RESOURCE_CONTESTED, badge_rect, width=2, border_radius=9)
+                _draw_shadow_text(screen, tiny, "!", badge_rect.x + 7, badge_rect.y + 1, TEXT_PRIMARY, shadow=(0, 0, 0), shadow_offset=1)
+            else:
+                pygame.draw.circle(screen, (*RESOURCE_GLOW, 115), ring_center, max(12, int(HEX_SIZE * 0.48)), width=2)
+
             sprite_key = "horses" if r.resource_type == "horses" else "stone" if r.resource_type == "stone" else "resource"
             _draw_asset_marker(
                 screen,
@@ -2587,6 +2680,13 @@ def run_viewer() -> None:
             draw_center = (cx, cy + unit_offset_y)
             if not _draw_unit_sprite(screen, board_assets, env, u, draw_center, color, border, size=unit_size):
                 _draw_unit_icon(screen, u, draw_center, color, border)
+            if u.unit_type == "worker":
+                resource = env.resource_at_for_faction(u.position, u.faction)
+                if resource is not None and not env.can_gather_resource(u, resource):
+                    badge = pygame.Rect(cx + unit_size // 3, cy - unit_size, 18, 18)
+                    pygame.draw.rect(screen, (68, 28, 26), badge, border_radius=8)
+                    pygame.draw.rect(screen, RESOURCE_CONTESTED, badge, width=2, border_radius=8)
+                    _draw_shadow_text(screen, tiny, "!", badge.x + 6, badge.y, TEXT_PRIMARY, shadow=(0, 0, 0), shadow_offset=1)
 
         _draw_effects(screen, effects, board_origin[0], board_origin[1], HEX_WIDTH, small)
         screen.set_clip(previous_clip)
@@ -2619,7 +2719,7 @@ def run_viewer() -> None:
         if selected_unit_id is None and selected_tile is not None:
             inspect_rect = pygame.Rect(board_backdrop.x + 18, board_backdrop.y + 18, 300, 252)
             selected_building = next((b for b in env.buildings if b.position == selected_tile), None)
-            selected_resource = next((r for r in env.resources if r.position == selected_tile and r.remaining > 0), None)
+            selected_resource = next((r for r in env.resources if r.position == selected_tile and r.abundance > 0), None)
             selected_base_entry = next(((faction, base) for faction, base in env.bases.items() if base.position == selected_tile), None)
             if selected_building is not None:
                 spec = production.building_stats(env, selected_building.faction, selected_building.building_type)
@@ -2676,7 +2776,7 @@ def run_viewer() -> None:
                     inspect_rect,
                     title=RESOURCE_LABELS.get(selected_resource.resource_type, selected_resource.resource_type.title()),
                     subtitle="Map resource",
-                    lines=_selected_resource_lines(_PANEL_TEXT, selected_resource)[1:],
+                    lines=_selected_resource_lines(_PANEL_TEXT, selected_resource, env, current_faction)[1:],
                     icon_kind=resource_kind,
                     accent=(136, 170, 102),
                 )

@@ -15,6 +15,8 @@ def gather(env, worker_id: int) -> bool:
     node = env.resource_at_for_faction(unit.position, unit.faction)
     if node is None:
         return False
+    if not env.can_gather_resource(unit, node):
+        return False
 
     amount = env.config.worker_gather_amount + tech.passive_modifier_total(env, unit.faction, "worker_gather_bonus")
     env.faction_state(unit.faction).resources += amount

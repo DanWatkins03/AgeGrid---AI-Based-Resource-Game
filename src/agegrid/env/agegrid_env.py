@@ -8,7 +8,7 @@ from src.agegrid.env import hexgrid
 from src.agegrid.env.actions import Action
 from src.agegrid.env.entities import Base, Building, ResourceNode, Unit
 from src.agegrid.env.state import BankView, FactionState, RelationState
-from src.agegrid.env.systems import combat, economy, mapgen, movement, production, tech, victory
+from src.agegrid.env.systems import combat, diplomacy, economy, mapgen, movement, production, tech, victory
 
 Position = tuple[int, int]
 ActionHandler = Callable[[str, Action | tuple], tuple[bool, str]]
@@ -49,6 +49,18 @@ class GameConfig:
     peace_offer_min_turns: int = 4
     truce_turns: int = 8
     peace_indemnity_base: int = 24
+    war_declaration_cost: int = 8
+    war_declaration_support_penalty: int = 10
+    war_support_to_declare_min: int = 25
+    war_upkeep_per_turn: int = 2
+    war_upkeep_aggressor_bonus: int = 1
+    war_support_drain_per_turn: int = 1
+    failed_war_support_penalty: int = 14
+    successful_war_support_bonus: int = 6
+    peace_relief_support_bonus: int = 3
+    war_score_unit_kill: int = 3
+    war_score_worker_kill: int = 2
+    war_score_base_damage: int = 1
 
 
 class AgeGridEnv:
@@ -236,16 +248,31 @@ class AgeGridEnv:
         return frozenset((faction_a, faction_b))
 
     def _refresh_relation_state(self, relation: RelationState) -> RelationState:
-        if relation.state == "truce" and self.turn >= relation.truce_until_turn:
-            relation.state = "peace"
-            relation.since_turn = self.turn
-            relation.pending_peace_by = None
-            relation.pending_indemnity = 0
-        return relation
+        return diplomacy.refresh_relation_state(self, relation)
 
     def _clear_pending_peace(self, relation: RelationState) -> None:
-        relation.pending_peace_by = None
-        relation.pending_indemnity = 0
+        diplomacy.clear_pending_peace(relation)
+
+    def _ensure_war_score(self, relation: RelationState) -> None:
+        diplomacy.ensure_war_score(self, relation)
+
+    def _change_war_support(self, faction: str, delta: int) -> int:
+        return diplomacy.change_war_support(self, faction, delta)
+
+    def war_score(self, faction: str, enemy_faction: str) -> int:
+        return diplomacy.war_score(self, faction, enemy_faction)
+
+    def _award_war_score(self, faction: str, enemy_faction: str, amount: int) -> None:
+        diplomacy.award_war_score(self, faction, enemy_faction, amount)
+
+    def record_unit_casualty(self, attacker_faction: str, defender_faction: str, unit_type: str) -> None:
+        diplomacy.record_unit_casualty(self, attacker_faction, defender_faction, unit_type)
+
+    def record_base_damage(self, attacker_faction: str, defender_faction: str, damage: int) -> None:
+        diplomacy.record_base_damage(self, attacker_faction, defender_faction, damage)
+
+    def _war_upkeep(self, faction: str, relation: RelationState) -> int:
+        return diplomacy.war_upkeep(self, faction, relation)
 
     def relation_state(self, faction_a: str, faction_b: str) -> RelationState:
         key = self._relation_key(faction_a, faction_b)
@@ -257,54 +284,22 @@ class AgeGridEnv:
         return self.relation_state(faction_a, faction_b).state == "war"
 
     def can_declare_war(self, faction: str, target_faction: str) -> bool:
-        relation = self.relation_state(faction, target_faction)
-        return relation.state != "war" and self.turn >= relation.truce_until_turn
+        return diplomacy.can_declare_war(self, faction, target_faction)
 
     def declare_war(self, faction: str, target_faction: str) -> bool:
-        if not self.can_declare_war(faction, target_faction):
-            return False
-        relation = self.relation_state(faction, target_faction)
-        relation.state = "war"
-        relation.since_turn = self.turn
-        self._clear_pending_peace(relation)
-        return True
+        return diplomacy.declare_war(self, faction, target_faction)
 
     def can_offer_peace(self, faction: str, target_faction: str) -> bool:
-        relation = self.relation_state(faction, target_faction)
-        return (
-            relation.state == "war"
-            and self.turn - relation.since_turn >= self.config.peace_offer_min_turns
-            and relation.pending_peace_by is None
-        )
+        return diplomacy.can_offer_peace(self, faction, target_faction)
 
     def offer_peace(self, faction: str, target_faction: str, indemnity: int) -> bool:
-        if not self.can_offer_peace(faction, target_faction):
-            return False
-        relation = self.relation_state(faction, target_faction)
-        relation.pending_peace_by = faction
-        relation.pending_indemnity = max(0, indemnity)
-        return True
+        return diplomacy.offer_peace(self, faction, target_faction, indemnity)
 
     def can_accept_peace(self, faction: str, target_faction: str) -> bool:
-        relation = self.relation_state(faction, target_faction)
-        return relation.state == "war" and relation.pending_peace_by == target_faction
+        return diplomacy.can_accept_peace(self, faction, target_faction)
 
     def accept_peace(self, faction: str, target_faction: str) -> int | None:
-        if not self.can_accept_peace(faction, target_faction):
-            return None
-        relation = self.relation_state(faction, target_faction)
-        payer = relation.pending_peace_by
-        if payer is None:
-            return None
-        receiver = target_faction if payer == faction else faction
-        indemnity = min(relation.pending_indemnity, self.bank[payer])
-        self.bank[payer] -= indemnity
-        self.bank[receiver] += indemnity
-        relation.state = "truce"
-        relation.since_turn = self.turn
-        relation.truce_until_turn = self.turn + self.config.truce_turns
-        self._clear_pending_peace(relation)
-        return indemnity
+        return diplomacy.accept_peace(self, faction, target_faction)
 
     def _occupied_positions(self) -> set[Position]:
         occupied = {base.position for base in self.bases.values()}
@@ -320,9 +315,21 @@ class AgeGridEnv:
                 and resource.required_tech not in self.faction_state(faction).techs_unlocked
             ):
                 continue
-            if resource.position == pos and resource.remaining > 0:
+            if resource.position == pos and resource.abundance > 0:
                 return resource
         return None
+
+    def resource_is_contested(self, resource: ResourceNode, faction: str) -> bool:
+        return any(
+            unit.faction != faction
+            and unit.attack_damage > 0
+            and self.at_war(faction, unit.faction)
+            and hexgrid.distance(unit.position, resource.position) <= 1
+            for unit in self.units
+        )
+
+    def can_gather_resource(self, worker: Unit, resource: ResourceNode) -> bool:
+        return not self.resource_is_contested(resource, worker.faction)
 
     def _current_faction(self) -> str:
         return self.factions[self.current_player]
@@ -430,7 +437,7 @@ class AgeGridEnv:
         return [
             resource
             for resource in self.resources
-            if resource.remaining > 0
+            if resource.abundance > 0
             and (
                 resource.required_tech is None
                 or resource.required_tech in self.faction_state(faction).techs_unlocked
@@ -449,7 +456,8 @@ class AgeGridEnv:
         visible_resources = self.visible_resources(faction)
 
         for worker in workers:
-            if self._resource_at(worker.position, faction) is not None:
+            resource = self._resource_at(worker.position, faction)
+            if resource is not None and self.can_gather_resource(worker, resource):
                 action_set.add(("gather", worker.id))
 
             self._add_move_actions(
@@ -627,7 +635,13 @@ class AgeGridEnv:
         target_faction = action[1]
         if not self.declare_war(faction, target_faction):
             return False, "declare_war_failed"
-        return self._success("declare_war", event=f"{faction} declared war on {target_faction}")
+        return self._success(
+            "declare_war",
+            event=(
+                f"{faction} declared war on {target_faction} "
+                f"(cost {self.config.war_declaration_cost}, support {self.faction_state(faction).war_support})"
+            ),
+        )
 
     def _handle_offer_peace(self, faction: str, action: Action | tuple) -> tuple[bool, str]:
         if len(action) != 3:
@@ -645,12 +659,24 @@ class AgeGridEnv:
         if len(action) != 2:
             return False, "bad_args"
         target_faction = action[1]
+        faction_support_before = self.faction_state(faction).war_support
+        target_support_before = self.faction_state(target_faction).war_support
         indemnity = self.accept_peace(faction, target_faction)
         if indemnity is None:
             return False, "accept_peace_failed"
+        relation = self.relation_state(faction, target_faction)
+        faction_support_after = self.faction_state(faction).war_support
+        target_support_after = self.faction_state(target_faction).war_support
+        faction_support_delta = faction_support_after - faction_support_before
+        target_support_delta = target_support_after - target_support_before
         return self._success(
             "accept_peace",
-            event=f"{faction} accepted peace with {target_faction} (indemnity {indemnity})",
+            event=(
+                f"{faction} accepted peace with {target_faction} "
+                f"(indemnity {indemnity}, truce {relation.truce_until_turn - self.turn} turns, "
+                f"{faction} support {faction_support_after} ({faction_support_delta:+d}), "
+                f"{target_faction} support {target_support_after} ({target_support_delta:+d}))"
+            ),
         )
 
     def _handle_attack(self, faction: str, action: Action | tuple) -> tuple[bool, str]:
@@ -813,12 +839,13 @@ class AgeGridEnv:
         faction = self._current_faction()
         self._record_events(combat.resolve_defensive_fire(self, faction))
         if self.winner() is not None:
-            self._advance_turn_pointer()
             return
 
         completed_tech = tech.progress_research(self, faction)
         if completed_tech is not None:
             self._record_event(f"{faction} completed research: {completed_tech}")
+
+        diplomacy.apply_turn_costs(self, faction)
 
         income = self._passive_income_for(faction)
         self.faction_state(faction).resources += income
