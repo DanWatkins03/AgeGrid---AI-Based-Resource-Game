@@ -149,6 +149,9 @@ def apply_turn_costs(env, faction: str) -> None:
     for enemy in env._enemy_factions(faction):
         relation = env.relation_state(faction, enemy)
         if relation.state != "war":
+            support_delta = change_war_support(env, faction, env.config.peace_support_recovery_per_turn)
+            if support_delta > 0 and env.faction_state(faction).war_support <= env.config.war_support_to_declare_min:
+                env._record_event(f"{faction} war support recovered to {env.faction_state(faction).war_support}")
             continue
         upkeep = min(war_upkeep(env, faction, relation), env.bank[faction])
         if upkeep > 0:

@@ -37,6 +37,7 @@ class FactionTurnInfo:
     research: str = "-"
     attacks: str = "-"
     turn_number: int = 0
+    decisions: list[str] | None = None
 
 
 @dataclass
@@ -85,6 +86,7 @@ def build_turn_info(
     log: list[str],
     events: list[str],
     turn_number: int = 0,
+    decisions: list[str] | None = None,
 ) -> FactionTurnInfo:
     research = next((_format_action(action) for action in actions if action and action[0] == "research"), "-")
     attacks = next(
@@ -98,20 +100,38 @@ def build_turn_info(
         research=research,
         attacks=attacks,
         turn_number=turn_number,
+        decisions=(decisions or [])[-6:],
     )
+
+
+def _agent_decision_lines(agent) -> list[str]:
+    explain = getattr(agent, "explain_last_decision", None)
+    if explain is None:
+        return []
+    summary = explain()
+    if summary == "No decision":
+        return [summary]
+    lines = [summary]
+    candidates = getattr(agent, "last_candidates", [])
+    for candidate in candidates[1:3]:
+        reasons = ", ".join(candidate.reasons)
+        lines.append(f"Candidate {candidate.source}: {candidate.action} score={candidate.score} ({reasons})")
+    return lines
 
 
 def step_faction_with_trace(env: AgeGridEnv, agent) -> tuple[FactionTurnInfo, list[tuple | None]]:
     actions: list[tuple | None] = []
+    decisions: list[str] = []
 
     def decide(current_env: AgeGridEnv):
         action = agent.act(current_env)
         actions.append(action)
+        decisions.extend(_agent_decision_lines(agent))
         return action
 
     faction = env.factions[env.current_player]
     log = env.step_faction(decide)
-    return build_turn_info(faction, actions, log, list(env.current_events), env.turn + 1), actions
+    return build_turn_info(faction, actions, log, list(env.current_events), env.turn + 1, decisions), actions
 
 
 def turn_snapshot(env: AgeGridEnv, red_info: FactionTurnInfo, blue_info: FactionTurnInfo) -> TurnSnapshot:
@@ -149,9 +169,13 @@ def turn_history_text(history: list[TurnSnapshot]) -> list[str]:
         lines.append(
             f"  Red log: {', '.join(snapshot.red.log) if snapshot.red.log else '-'}"
         )
+        if snapshot.red.decisions:
+            lines.append(f"  Red AI: {' | '.join(snapshot.red.decisions)}")
         lines.append(
             f"  Blue log: {', '.join(snapshot.blue.log) if snapshot.blue.log else '-'}"
         )
+        if snapshot.blue.decisions:
+            lines.append(f"  Blue AI: {' | '.join(snapshot.blue.decisions)}")
     return lines
 
 
@@ -187,6 +211,8 @@ def build_debug_snapshot(
         f"Blue army plan: {army_plan(env, 'Blue')}",
         f"Red heuristic: {heuristic_diagnostics_label(env, 'Red')}",
         f"Blue heuristic: {heuristic_diagnostics_label(env, 'Blue')}",
+        f"Red AI decision: {' | '.join(red_info.decisions or []) or '-'}",
+        f"Blue AI decision: {' | '.join(blue_info.decisions or []) or '-'}",
         f"Red techs: {', '.join(sorted(env.faction_state('Red').techs_unlocked)) or '-'}",
         f"Blue techs: {', '.join(sorted(env.faction_state('Blue').techs_unlocked)) or '-'}",
         f"Red buildings: {', '.join(sorted(f'{_building_label(b.building_type)}@{b.position}' for b in env.buildings if b.faction == 'Red' and b.hp > 0)) or '-'}",
@@ -211,6 +237,8 @@ def build_debug_snapshot(
             f"Last blue action: {blue_info.last_action}",
             f"Red log: {', '.join(red_info.log) if red_info.log else '-'}",
             f"Blue log: {', '.join(blue_info.log) if blue_info.log else '-'}",
+            f"Red AI trace: {' | '.join(red_info.decisions or []) or '-'}",
+            f"Blue AI trace: {' | '.join(blue_info.decisions or []) or '-'}",
             "Full turn history:",
         ]
     )

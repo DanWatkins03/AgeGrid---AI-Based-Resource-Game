@@ -55,6 +55,7 @@ class GameConfig:
     war_upkeep_per_turn: int = 2
     war_upkeep_aggressor_bonus: int = 1
     war_support_drain_per_turn: int = 1
+    peace_support_recovery_per_turn: int = 2
     failed_war_support_penalty: int = 14
     successful_war_support_bonus: int = 6
     peace_relief_support_bonus: int = 3

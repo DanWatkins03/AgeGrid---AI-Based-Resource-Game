@@ -1457,6 +1457,23 @@ def _safe_scale(surface: pygame.Surface | None, size: tuple[int, int]) -> pygame
         return None
     return pygame.transform.smoothscale(surface, size)
 
+
+def _fit_sprite_to_box(
+    sprite: pygame.Surface | None,
+    max_size: tuple[int, int],
+    *,
+    fill: float = 1.0,
+) -> pygame.Surface | None:
+    if sprite is None:
+        return None
+    max_w, max_h = max_size
+    if max_w <= 0 or max_h <= 0 or sprite.get_width() <= 0 or sprite.get_height() <= 0:
+        return None
+    scale = min(max_w / sprite.get_width(), max_h / sprite.get_height()) * fill
+    target_w = max(1, round(sprite.get_width() * scale))
+    target_h = max(1, round(sprite.get_height() * scale))
+    return _safe_scale(sprite, (target_w, target_h))
+
 def _trim_sprite_alpha(sprite: pygame.Surface | None) -> pygame.Surface | None:
     if sprite is None:
         return None
@@ -1526,9 +1543,11 @@ def _draw_asset_marker(
     scale: tuple[int, int] = (40, 40),
     anchor_mode: str = "bottom",
     offset_y: int = 0,
+    preserve_aspect: bool = False,
+    fill: float = 1.0,
 ) -> None:
     trimmed = _trim_sprite_alpha(sprite)
-    scaled = _safe_scale(trimmed, scale)
+    scaled = _fit_sprite_to_box(trimmed, scale, fill=fill) if preserve_aspect else _safe_scale(trimmed, scale)
     if scaled is not None:
         if anchor_mode == "bottom":
             _blit_bottom_centered(surface, scaled, center, offset_y=offset_y)
@@ -2584,6 +2603,7 @@ def run_viewer() -> None:
                 lambda resource=r, resource_center=center: _draw_resource_icon(screen, resource, resource_center, tiny),
                 scale=(resource_scale, resource_scale),
                 offset_y=resource_offset_y,
+                preserve_aspect=True,
             )
 
         for faction, base in env.bases.items():
@@ -2612,8 +2632,9 @@ def run_viewer() -> None:
                 center,
                 lambda base_center=center, faction_color=color: pygame.draw.circle(screen, faction_color, base_center, base_circle_radius),
                 tint=color,
-                scale=(base_scale, base_scale),
+                scale=(max(34, int(HEX_WIDTH * 0.92)), max(32, int(HEX_HEIGHT * 0.82))),
                 offset_y=base_offset_y,
+                preserve_aspect=True,
             )
 
             hp_chip = pygame.Rect(bounds.centerx - 18, bounds.bottom - 12, 36, 22)
@@ -2625,9 +2646,12 @@ def run_viewer() -> None:
             color = (213, 136, 104) if b.faction == "Red" else (123, 164, 230)
             center = _hex_center(b.position[0], b.position[1], board_origin)
 
-            # Keep buildings grounded lower in the hex than units/resources so they
-            # read as placed structures rather than floating markers.
-            building_scale = max(22, int(HEX_SIZE * 1.22))
+            # Keep buildings in one consistent visual footprint regardless of the
+            # source image resolution or transparent padding.
+            building_box = (
+                max(24, int(HEX_WIDTH * 0.72)),
+                max(24, int(HEX_HEIGHT * 0.68)),
+            )
             building_rect_size = max(18, int(HEX_SIZE * 1.02))
             building_shadow_w = max(18, int(HEX_SIZE * 1.18))
             building_shadow_h = max(7, int(HEX_SIZE * 0.42))
@@ -2653,8 +2677,9 @@ def run_viewer() -> None:
                 center,
                 lambda building=b, building_rect=rect, border=color: _draw_building_icon(screen, building, building_rect, border),
                 tint=color,
-                scale=(building_scale, building_scale),
+                scale=building_box,
                 offset_y=building_offset_y,
+                preserve_aspect=True,
             )
 
         for u in env.units:
