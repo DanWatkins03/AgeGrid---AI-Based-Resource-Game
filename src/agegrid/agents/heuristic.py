@@ -2,12 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
-from typing import Callable, Iterable
+from typing import Iterable
 
 from src.agegrid.env.actions import Action
 from src.agegrid.env.agegrid_env import AgeGridEnv
 from src.agegrid.env import hexgrid
-from src.agegrid.env.systems import production, tech, threat
+from src.agegrid.env.systems import combat, diplomacy, production, tech, threat
+from src.agegrid.agents.heuristic_arbitration import rank_candidates, source_lookup
+from src.agegrid.agents.heuristic_context import HeuristicContext
+from src.agegrid.agents.heuristic_recovery import (
+    RecoveryHelpers,
+    choose_survival_fallback,
+    pressure_fallback_action,
+)
+from src.agegrid.agents.heuristic_rules import VetoHelpers, veto_action
+from src.agegrid.agents.heuristic_scoring import ScoringHelpers, utility_modifier
+from src.agegrid.agents.heuristic_strategy import (
+    CandidateSource,
+    StrategicIntent,
+    UtilityCandidate,
+    action_reasons,
+    source_intent_bias,
+    strategic_intent,
+)
 
 
 @dataclass(frozen=True)
@@ -92,22 +109,6 @@ class HeuristicDiagnostics:
     recovery: bool
 
 
-@dataclass(frozen=True)
-class UtilityCandidate:
-    action: Action
-    source: str
-    score: int
-    reasons: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class StrategicIntent:
-    name: str
-    reason: str
-    next_action: str
-    risk: str
-
-
 def _distance(a: tuple[int, int], b: tuple[int, int]) -> int:
     return hexgrid.distance(a, b)
 
@@ -131,8 +132,7 @@ def _enemy_base_siege_target(
     reserved: set[tuple[int, int]] | None = None,
 ) -> tuple[int, int] | None:
     base = _nearest_enemy_base(env, faction)
-    occupied = env._occupied_positions()
-    occupied.discard(unit.position)
+    occupied = env._movement_blocked_positions(unit)
     candidates = hexgrid.neighbors(base)
     reserved = reserved or set()
     valid = [
@@ -295,6 +295,26 @@ def heuristic_diagnostics(env: AgeGridEnv, faction: str) -> HeuristicDiagnostics
     )
 
 
+def _recovery_posture(
+    diagnostics: HeuristicDiagnostics,
+    workers: list,
+    military: list,
+    home_enemy_force: int,
+) -> str:
+    if not diagnostics.recovery:
+        return "none"
+    if (
+        (not workers and (diagnostics.military_gap >= 5 or home_enemy_force > 0))
+        or (diagnostics.economy_gap >= 8 and diagnostics.military_gap >= 5)
+        or (len(workers) <= 1 and home_enemy_force > 0)
+        or (len(military) <= 1 and diagnostics.military_gap >= 5)
+    ):
+        return "critical"
+    if len(workers) <= 1 or len(military) <= 2 or diagnostics.economy_gap >= 4 or diagnostics.military_gap >= 5:
+        return "fragile"
+    return "stable"
+
+
 def heuristic_diagnostics_label(env: AgeGridEnv, faction: str) -> str:
     diagnostics = heuristic_diagnostics(env, faction)
     state = "Recovery" if diagnostics.recovery else "Behind" if diagnostics.behind else "Stable"
@@ -409,6 +429,41 @@ def push_mode_active(env: AgeGridEnv, faction: str) -> bool:
     return _push_mode_active(env, faction)
 
 
+def _winning_finish_window(env: AgeGridEnv, faction: str, enemy: str, ctx: _Context) -> bool:
+    if not ctx.at_war or not ctx.military:
+        return False
+    if env.war_score(faction, enemy) - env.war_score(enemy, faction) < env.config.peace_winning_score_margin:
+        return False
+    if ctx.military_gap > 0 or ctx.home_enemy_force > ctx.home_friendly_force:
+        return False
+    enemy_base = env.bases[enemy]
+    front_units = [
+        unit for unit in ctx.military
+        if _distance(unit.position, enemy_base.position) <= env.config.peace_winning_front_radius
+    ]
+    reachable = bool(front_units) or any(action[0] == "attack_base" for action in ctx.legal)
+    if not reachable:
+        return False
+    near_damage = sum(max(1, unit.attack_damage) for unit in front_units)
+    plausible_finish = ctx.siege_finish or enemy_base.hp <= env.config.peace_winning_finish_hp + near_damage
+    return enemy_base.hp < env.config.base_hp or plausible_finish or ctx.push_mode
+
+
+def _peace_escape_needed(env: AgeGridEnv, faction: str, enemy: str, ctx: _Context) -> bool:
+    if env.faction_state(faction).war_support <= env.config.peace_exhausted_war_support:
+        return True
+    if ctx.last_stand or ctx.rebuild_mode or ctx.recovery_posture == "critical":
+        return True
+    if ctx.military_gap >= 5 or ctx.home_enemy_force > ctx.home_friendly_force:
+        return True
+    war_turns = env.turn - env.relation_state(faction, enemy).since_turn
+    front_units = [
+        unit for unit in ctx.military
+        if _distance(unit.position, env.bases[enemy].position) <= env.config.peace_winning_front_radius
+    ]
+    return war_turns >= env.config.peace_stalled_war_turns and env.bases[enemy].hp >= env.config.base_hp and not front_units
+
+
 def army_plan(env: AgeGridEnv, faction: str) -> str:
     military = [unit for unit in env.units if unit.faction == faction and unit.attack_damage > 0]
     enemy = next(name for name in env.factions if name != faction)
@@ -443,7 +498,7 @@ def army_strength_near_base(env: AgeGridEnv, faction: str, radius: int = 4) -> t
 def unit_composition(env: AgeGridEnv, faction: str) -> dict[str, int]:
     return {
         unit_type: _unit_count(env, faction, unit_type)
-        for unit_type in ("worker", "soldier", "archer", "horseman")
+        for unit_type in ("worker", "soldier", "archer", "horseman", "heavy_cavalry", "ballista")
     }
 
 
@@ -577,7 +632,7 @@ def _attack_priority(env: AgeGridEnv, faction: str, action: Action) -> tuple[flo
 
 def _nearest_build_site(env: AgeGridEnv, faction: str, worker_pos: tuple[int, int]) -> tuple[int, int] | None:
     base = env.bases[faction].position
-    occupied = env._occupied_positions()
+    occupied = env._construction_blocked_positions(faction)
     candidates = [pos for pos in hexgrid.positions_at_distance(base, 2, env.config.width, env.config.height) if pos != base]
     valid = [pos for pos in candidates if env._in_bounds(pos) and pos not in occupied]
     if not valid:
@@ -594,7 +649,7 @@ def _is_on_spawn_ring(env: AgeGridEnv, faction: str, pos: tuple[int, int]) -> bo
 
 
 def _spawn_ring_blocked(env: AgeGridEnv, faction: str) -> bool:
-    occupied = env._occupied_positions()
+    occupied = env._unit_positions()
     return all(env._in_bounds(pos) and pos in occupied for pos in _spawn_ring_positions(env, faction))
 
 
@@ -718,7 +773,41 @@ def _army_ready_to_push(env: AgeGridEnv, faction: str, target: tuple[int, int], 
     enemy = next(name for name in env.factions if name != faction)
     friendly_support = _support_count(env, target, faction)
     enemy_support = _local_force(env, target, enemy)
-    return friendly_support >= minimum_units and _local_force(env, target, faction) >= enemy_support + 1
+    if friendly_support >= minimum_units and _local_force(env, target, faction) >= enemy_support + 1:
+        return True
+    return _army_committed_to_push(env, faction, target, minimum_units=minimum_units)
+
+
+def _army_committed_to_push(env: AgeGridEnv, faction: str, target: tuple[int, int], minimum_units: int = 2) -> bool:
+    enemy = next(name for name in env.factions if name != faction)
+    military = [unit for unit in env.units if unit.faction == faction and unit.attack_damage > 0]
+    if len(military) < minimum_units:
+        return False
+    global_force = _total_force(env, faction)
+    enemy_global_force = _total_force(env, enemy)
+    if global_force < enemy_global_force + 2 and not (len(military) >= 4 and global_force >= enemy_global_force):
+        return False
+
+    close_units = [unit for unit in military if _distance(unit.position, target) <= 5]
+    reachable_units = [
+        unit
+        for unit in military
+        if _distance(unit.position, target) <= max(6, unit.move_steps + unit.attack_range + 2)
+    ]
+    if len(close_units) < minimum_units and len(reachable_units) < max(minimum_units, 3):
+        return False
+
+    close_force = sum(max(1, unit.attack_damage) + unit.hp // 4 for unit in close_units)
+    enemy_close_force = _local_force(env, target, enemy, radius=5)
+    enemy_base = env.bases[enemy].position
+    target_is_base_front = _distance(target, enemy_base) <= 3
+    enemy_exposed = enemy_global_force == 0 or close_force >= enemy_close_force or global_force >= enemy_global_force + 6
+
+    # The exact target-tile support check is still preferred, but staged armies
+    # should eventually commit.  If several units are close/reachable, global
+    # force is favourable, and the target is a base/frontier or an exposed enemy,
+    # waiting for perfect local odds just burns turns and causes rally bouncing.
+    return (target_is_base_front or enemy_exposed) and len(reachable_units) >= minimum_units
 
 
 def _frontline_is_losing_locally(env: AgeGridEnv, faction: str, target: tuple[int, int]) -> bool:
@@ -868,6 +957,29 @@ def _viable_unit_attack(env: AgeGridEnv, faction: str, action: Action) -> bool:
     return friendly_force >= enemy_force or target.hp <= attacker.attack_damage
 
 
+def _base_retaliation_damage_at(env: AgeGridEnv, defender: str, pos: tuple[int, int]) -> int:
+    damage = 0
+    base = env.bases[defender]
+    base_damage = env.config.base_attack_damage + tech.passive_modifier_total(env, defender, "base_attack_bonus")
+    base_range = env.config.base_attack_range + tech.passive_modifier_total(env, defender, "base_attack_range_bonus")
+    if base.hp > 0 and _distance(pos, base.position) <= base_range:
+        damage += base_damage
+    elif base.hp > 0:
+        # Combat applies light attrition even to long-range base chip. Mirror it
+        # here so the AI does not treat archers/siege outside city range as
+        # completely risk-free solo finishers.
+        damage += env.config.base_siege_attrition_damage
+    for building in env.buildings:
+        if building.faction != defender or building.hp <= 0:
+            continue
+        stats = production.building_stats(env, defender, building.building_type)
+        if stats is None or stats.attack_damage <= 0 or stats.attack_range <= 0:
+            continue
+        if _distance(pos, building.position) <= stats.attack_range:
+            damage += stats.attack_damage
+    return damage
+
+
 def _viable_base_attack(env: AgeGridEnv, faction: str, action: Action) -> bool:
     attacker = next((u for u in env.units if u.id == action[1]), None)
     if attacker is None:
@@ -883,8 +995,29 @@ def _viable_base_attack(env: AgeGridEnv, faction: str, action: Action) -> bool:
     enemy_force = _local_force(env, base_pos, enemy)
     base_threat = env.config.base_attack_damage
     base_threat += tech.passive_modifier_total(env, enemy, "base_attack_bonus")
-    if env.bases[enemy].hp <= attacker.attack_damage:
+    assault_damage = combat.base_assault_damage(env, attacker, enemy)
+    if env.bases[enemy].hp <= assault_damage:
         return True
+
+    if _enemy_can_finish_base_next_turn(env, faction) or _defensive_targets(env, faction):
+        return False
+
+    is_ranged_chip = attacker.attack_range > 1 or attacker.unit_type in {"archer", "ballista"}
+    meaningful_damage = assault_damage >= max(3, env.bases[enemy].hp // 8)
+    retaliation = _base_retaliation_damage_at(env, enemy, attacker.position)
+    can_survive_retaliation = attacker.hp > retaliation
+    safe_from_retaliation = retaliation == 0
+
+    # Melee base attacks are still treated as all-ins: if the hit cannot end the
+    # game, require a local group and enough force to absorb the base response.
+    # Ranged and siege units are different.  Productive chip damage from outside
+    # retaliation range should be allowed, otherwise the AI waits for perfect
+    # lethal odds and never wears the base down.
+    if is_ranged_chip and meaningful_damage and (safe_from_retaliation or can_survive_retaliation):
+        if safe_from_retaliation:
+            return enemy_force <= friendly_force + max(1, attacker.attack_damage)
+        return len(nearby_friendlies) >= 2 and friendly_force >= enemy_force
+
     if len(nearby_friendlies) < 2:
         return False
     return friendly_force >= enemy_force + base_threat
@@ -908,28 +1041,40 @@ def _enemy_can_finish_base_next_turn(env: AgeGridEnv, faction: str) -> bool:
     attackers = _enemy_attackers_in_base_range(env, faction)
     if not attackers:
         return False
-    strongest_attack = max(unit.attack_damage for unit in attackers)
+    strongest_attack = max(combat.base_assault_damage(env, unit, faction) for unit in attackers)
     return strongest_attack * env.config.actions_per_turn >= env.bases[faction].hp
 
 
-def _pressure_fallback_action(ctx) -> Action | None:
-    military_ids = {unit.id for unit in ctx.military}
-    priorities = (
-        "attack",
-        "attack_base",
-        "train",
-        "build",
-        "move_towards",
-        "gather",
-        "accept_peace",
-    )
-    for kind in priorities:
-        for action in ctx.legal:
-            if action[0] == kind:
-                if kind == "move_towards" and action[1] not in military_ids:
-                    continue
-                return action
-    return None
+def _legal_home_guard_action(env: AgeGridEnv, ctx, unit) -> Action | None:
+    home_positions = {
+        env.bases[ctx.faction].position,
+        *(worker.position for worker in ctx.workers),
+        *(building.position for building in env.buildings if building.faction == ctx.faction and building.hp > 0),
+    }
+    home_moves = [
+        action
+        for action in ctx.legal
+        if action[0] == "move_towards"
+        and action[1] == unit.id
+        and action[2] in home_positions
+        and action[2] != unit.position
+    ]
+    if not home_moves:
+        home_moves = [
+            action
+            for action in ctx.legal
+            if action[0] == "move_towards"
+            and action[1] == unit.id
+            and _distance(action[2], env.bases[ctx.faction].position) <= 2
+            and action[2] != unit.position
+        ]
+    if not home_moves:
+        return None
+    home = env.bases[ctx.faction].position
+    return min(home_moves, key=lambda action: (_distance(unit.position, action[2]), _distance(action[2], home), action[2]))
+
+
+_Context = HeuristicContext
 
 
 class HeuristicAgent:
@@ -961,47 +1106,8 @@ class HeuristicAgent:
         self.last_decision: UtilityCandidate | None = None
         self.last_candidates: list[UtilityCandidate] = []
         self.last_intent: StrategicIntent | None = None
-
-    @dataclass
-    class _Context:
-        faction: str
-        enemy_faction: str
-        state: object
-        legal: list[Action]
-        diagnostics: HeuristicDiagnostics
-        threat_map: threat.ThreatMap
-        at_war: bool
-        in_truce: bool
-        defense_mode: bool
-        base_under_siege: bool
-        workers: list
-        buildings: set[str]
-        military: list
-        emergency_targets: list
-        contested_resources: list
-        resource_contesters: list
-        enemy_resource_workers: list
-        nearby_cavalry: list
-        rally_anchor: tuple[int, int] | None
-        spawn_actions: list[Action]
-        emergency_train: Action | None
-        home_friendly_force: int
-        home_enemy_force: int
-        tech_deficit: int
-        economy_gap: int
-        military_gap: int
-        behind_mode: bool
-        recovery_mode: bool
-        push_mode: bool
-        siege_finish: bool
-        collapse_mode: bool
-        last_stand: bool
-        desired_home_force: int
-        useful_worker_slots: int
-        rebuild_mode: bool
-        declare_war_actions: list[Action]
-        offer_peace_actions: list[Action]
-        accept_peace_actions: list[Action]
+        self.last_vetoes: list[str] = []
+        self.last_no_decision_reason: str | None = None
 
     def _ordered_workers(self, faction: str, workers: list) -> list:
         if not workers:
@@ -1150,7 +1256,8 @@ class HeuristicAgent:
         enemy_resource_workers = _enemy_resource_workers(env, faction)
         nearby_cavalry = _enemy_cavalry_nearby(env, faction)
         home_friendly_force, home_enemy_force = _home_force_balance(env, faction)
-        return self._Context(
+        recovery_posture = _recovery_posture(diagnostics, workers, military, home_enemy_force)
+        return HeuristicContext(
             faction=faction,
             enemy_faction=enemy_faction,
             state=env.faction_state(faction),
@@ -1179,6 +1286,7 @@ class HeuristicAgent:
             military_gap=diagnostics.military_gap,
             behind_mode=diagnostics.behind,
             recovery_mode=diagnostics.recovery,
+            recovery_posture=recovery_posture,
             push_mode=_push_mode_active(env, faction),
             siege_finish=_enemy_broken(env, faction) and bool(military),
             collapse_mode=not workers,
@@ -1207,203 +1315,27 @@ class HeuristicAgent:
         return self._strategic_intent(ctx).name
 
     def _strategic_intent(self, ctx: _Context) -> StrategicIntent:
-        if ctx.base_under_siege or ctx.last_stand:
-            reason = "base under siege" if ctx.base_under_siege else "home force losing"
-            return StrategicIntent("last_stand", reason, "remove immediate threat", "high")
-        if ctx.rebuild_mode:
-            return StrategicIntent(
-                "rebuild",
-                f"home force {ctx.home_friendly_force} vs {ctx.home_enemy_force}",
-                "train or pull defenders home",
-                "high",
-            )
-        if ctx.defense_mode or ctx.home_enemy_force > 0:
-            reason = "enemy near home" if ctx.home_enemy_force > 0 else "worker/base threat"
-            return StrategicIntent("defend", reason, "intercept threat", "medium")
-        if ctx.siege_finish:
-            return StrategicIntent("siege", "enemy army and workers broken", "attack base", "low")
-        if ctx.recovery_mode:
-            reason_parts = []
-            if ctx.economy_gap:
-                reason_parts.append(f"economy gap {ctx.economy_gap}")
-            if ctx.military_gap:
-                reason_parts.append(f"military gap {ctx.military_gap}")
-            if ctx.tech_deficit:
-                reason_parts.append(f"tech gap {ctx.tech_deficit}")
-            return StrategicIntent(
-                "recover",
-                ", ".join(reason_parts) or "behind",
-                "stabilize economy and defenders",
-                "high" if ctx.military_gap >= 8 or ctx.economy_gap >= 8 else "medium",
-            )
-        if ctx.push_mode:
-            return StrategicIntent("push", "safe army advantage", "pressure frontline", "medium")
-        if ctx.behind_mode:
-            return StrategicIntent("catch_up", "strategic deficit", "close tech/economy gap", "medium")
-        return StrategicIntent("develop", "no urgent threat", "grow economy and tech", "low")
+        return strategic_intent(ctx)
 
     def _action_reasons(self, env: AgeGridEnv, ctx: _Context, action: Action) -> tuple[str, ...]:
-        reasons: list[str] = [self._strategy_signal(ctx)]
-        kind = action[0]
-        if kind == "train":
-            reasons.append(f"train:{action[1]}")
-            if ctx.base_under_siege or _enemy_pressure_near_base(env, ctx.faction):
-                reasons.append("home_pressure")
-            if ctx.home_friendly_force < ctx.desired_home_force:
-                reasons.append("needs_home_force")
-            if ctx.military_gap > 0:
-                reasons.append(f"military_gap:{ctx.military_gap}")
-        elif kind == "build":
-            reasons.append(f"build:{action[2]}")
-            if action[2] in {"archer_tower", "ballista_tower", "wall", "stronghold"}:
-                reasons.append("territory_defense")
-            elif action[2] in {"storehouse", "market", "quarry"}:
-                reasons.append("economy_infrastructure")
-        elif kind == "research":
-            reasons.append(f"research:{action[1]}")
-            if ctx.tech_deficit > 0:
-                reasons.append(f"tech_gap:{ctx.tech_deficit}")
-        elif kind == "attack":
-            target = next((unit for unit in env.units if unit.id == action[2]), None)
-            if target is not None:
-                reasons.append(f"target:{target.unit_type}")
-                if target.attack_damage > 0:
-                    reasons.append("remove_threat")
-                if target.hp <= next((unit.attack_damage for unit in env.units if unit.id == action[1]), 0):
-                    reasons.append("lethal")
-        elif kind == "attack_base":
-            reasons.append("base_damage")
-            if ctx.siege_finish:
-                reasons.append("enemy_broken")
-        elif kind == "move_towards":
-            unit = next((candidate for candidate in env.units if candidate.id == action[1]), None)
-            if unit is not None:
-                reasons.append(f"move:{unit.unit_type}")
-                if unit.attack_damage > 0:
-                    reasons.append("military_positioning")
-                    danger = ctx.threat_map.danger_at(action[2])
-                    if danger > 0:
-                        reasons.append(f"destination_danger:{danger}")
-                else:
-                    reasons.append("worker_positioning")
-        elif kind == "spawn_worker":
-            reasons.append("worker_count")
-        elif kind == "gather":
-            reasons.append("income_now")
-        elif kind in {"declare_war", "offer_peace", "accept_peace"}:
-            reasons.append(f"diplomacy:{kind}")
-        return tuple(reasons)
-
-    def _utility_modifier(self, env: AgeGridEnv, ctx: _Context, action: Action) -> int:
-        kind = action[0]
-        modifier = 0
-        intent = self._strategic_intent(ctx)
-        if ctx.base_under_siege:
-            modifier += 120 if kind in {"attack", "train", "move_towards"} else -80
-        elif ctx.defense_mode or ctx.home_enemy_force > 0:
-            modifier += 70 if kind in {"attack", "train", "move_towards", "build"} else -35
-        elif ctx.push_mode or ctx.siege_finish:
-            modifier += 55 if kind in {"attack", "attack_base", "move_towards", "declare_war"} else 0
-        elif ctx.behind_mode:
-            modifier += 40 if kind in {"train", "build", "gather", "spawn_worker"} else 0
-
-        if intent.name in {"recover", "rebuild"}:
-            if kind in {"train", "build", "gather", "spawn_worker", "accept_peace", "offer_peace"}:
-                modifier += 35
-            if kind == "move_towards" and ctx.military_gap >= 8:
-                modifier -= 35
-            if kind in {"declare_war", "attack_base"} and not _enemy_can_finish_base_next_turn(env, ctx.enemy_faction):
-                modifier -= 80
-        elif intent.name == "siege":
-            if kind == "attack_base":
-                modifier += 160
-            elif kind == "move_towards":
-                modifier += 75
-            elif kind in {"research", "gather", "spawn_worker"}:
-                modifier -= 120
-        elif intent.name == "push":
-            if kind in {"attack", "move_towards", "attack_base", "declare_war"}:
-                modifier += 25
-            if kind in {"gather", "spawn_worker"} and ctx.military:
-                modifier -= 30
-
-        if kind == "train":
-            unit_type = action[1]
-            if ctx.home_friendly_force < ctx.desired_home_force:
-                modifier += 45
-            if ctx.military_gap > 0:
-                modifier += min(60, ctx.military_gap * 6)
-            if unit_type == "archer" and ctx.nearby_cavalry:
-                modifier += 30
-        elif kind == "build":
-            building_type = action[2]
-            if building_type in {"archer_tower", "ballista_tower", "wall", "stronghold"}:
-                modifier += 35 if ctx.defense_mode or ctx.behind_mode else 10
-            if building_type in {"storehouse", "market", "quarry"} and ctx.economy_gap > 0:
-                modifier += min(40, ctx.economy_gap * 5)
-        elif kind == "research":
-            modifier += min(35, ctx.tech_deficit * 7)
-            if ctx.at_war:
-                modifier -= 25
-        elif kind == "attack":
-            target = next((unit for unit in env.units if unit.id == action[2]), None)
-            attacker = next((unit for unit in env.units if unit.id == action[1]), None)
-            if target is not None:
-                if target.attack_damage > 0:
-                    modifier += 35
-                if attacker is not None and target.hp <= attacker.attack_damage:
-                    modifier += 25
-                modifier -= min(15, target.hp)
-        elif kind == "attack_base":
-            enemy = action[2]
-            attacker = next((unit for unit in env.units if unit.id == action[1]), None)
-            if attacker is not None and env.bases[enemy].hp <= attacker.attack_damage:
-                modifier += 100
-        elif kind == "move_towards":
-            unit = next((candidate for candidate in env.units if candidate.id == action[1]), None)
-            if unit is not None and unit.attack_damage > 0:
-                modifier += 20
-                danger = ctx.threat_map.danger_at(action[2])
-                danger_cap = 80 if intent.name in {"recover", "rebuild"} else 55 if intent.name != "siege" else 35
-                modifier -= min(danger_cap, danger * 8)
-                if danger >= 6 and not ctx.siege_finish:
-                    modifier -= 20
-            elif ctx.defense_mode or ctx.rebuild_mode:
-                modifier -= 40
-        elif kind == "spawn_worker":
-            if _hold_defender_reserve(env, ctx, production.unit_cost(env, ctx.faction, "worker") or env.config.worker_spawn_cost):
-                modifier -= 120
-            elif _unit_count(env, ctx.faction, "worker") < ctx.useful_worker_slots:
-                modifier += 35
-        elif kind == "gather":
-            modifier += min(25, ctx.economy_gap * 4)
-            if ctx.base_under_siege:
-                modifier -= 75
-        return modifier
+        return action_reasons(
+            env,
+            ctx,
+            action,
+            self._strategic_intent(ctx),
+            _enemy_pressure_near_base(env, ctx.faction),
+        )
 
     def _score_action(self, env: AgeGridEnv, ctx: _Context, action: Action, source: str, base_score: int) -> UtilityCandidate:
-        score = base_score + self._utility_modifier(env, ctx, action)
         intent = self._strategic_intent(ctx)
-        if intent.name in {"recover", "rebuild"}:
-            if source in {"emergency_production", "production", "defense", "economy", "diplomacy"}:
-                score += 45
-            elif source == "resource_pressure" and ctx.military_gap >= 8 and not ctx.resource_contesters:
-                score -= 180
-        elif intent.name == "siege":
-            if source == "base_attack":
-                score += 175
-            elif source == "military_movement":
-                score += 90
-            elif source in {"economy", "research", "production"}:
-                score -= 140
-        elif intent.name == "defend":
-            if source in {"attack", "defense", "emergency_production"}:
-                score += 60
-        elif intent.name == "push":
-            if source in {"attack", "resource_pressure", "base_attack", "military_movement", "diplomacy"}:
-                score += 35
-            elif source in {"economy", "worker"}:
-                score -= 45
+        helpers = ScoringHelpers(
+            distance=_distance,
+            enemy_pressure_near_base=_enemy_pressure_near_base,
+            enemy_can_finish_base_next_turn=_enemy_can_finish_base_next_turn,
+            hold_defender_reserve=_hold_defender_reserve,
+            unit_count=_unit_count,
+        )
+        score = base_score + utility_modifier(env, ctx, action, intent, helpers) + source_intent_bias(intent, ctx, source)
         return UtilityCandidate(
             action=action,
             source=source,
@@ -1417,38 +1349,68 @@ class HeuristicAgent:
     def _restore_targeting_snapshot(self, snapshot: tuple[dict[int, tuple[int, int]], dict[int, int]]) -> None:
         self._military_targets, self._military_target_lock = snapshot
 
-    def _candidate_choosers(self) -> tuple[tuple[str, int, Callable[[AgeGridEnv, _Context], Action | None]], ...]:
+    def _candidate_sources(self) -> tuple[CandidateSource, ...]:
         return (
-            ("diplomacy", 1200, self._choose_diplomacy_action),
-            ("research", 1100, self._choose_research_action),
-            ("collapse_recovery", 1000, self._choose_collapse_recovery),
-            ("attack", 950, self._choose_attack_action),
-            ("defense", 900, self._choose_defense_action),
-            ("resource_pressure", 850, self._choose_resource_pressure_action),
-            ("base_attack", 800, self._choose_base_attack_action),
-            ("emergency_production", 750, self._choose_emergency_production),
-            ("production", 650, self._choose_production_action),
-            ("economy", 550, self._choose_economy_action),
-            ("military_movement", 500, self._choose_military_movement),
-            ("worker", 400, self._choose_worker_action),
+            CandidateSource("diplomacy", 720, self._choose_diplomacy_action),
+            CandidateSource("research", 660, self._choose_research_action),
+            CandidateSource("collapse_recovery", 650, self._choose_collapse_recovery),
+            CandidateSource("attack", 640, self._choose_attack_action),
+            CandidateSource("defense", 630, self._choose_defense_action),
+            CandidateSource("resource_pressure", 600, self._choose_resource_pressure_action),
+            CandidateSource("base_attack", 590, self._choose_base_attack_action),
+            CandidateSource("emergency_production", 580, self._choose_emergency_production),
+            CandidateSource("production", 560, self._choose_production_action),
+            CandidateSource("economy", 540, self._choose_economy_action),
+            CandidateSource("military_movement", 520, self._choose_military_movement),
+            CandidateSource("worker", 500, self._choose_worker_action),
         )
 
     def _rank_candidates(self, env: AgeGridEnv, ctx: _Context) -> list[UtilityCandidate]:
-        candidates: list[UtilityCandidate] = []
-        for source, base_score, chooser in self._candidate_choosers():
-            snapshot = self._targeting_snapshot()
-            action = chooser(env, ctx)
-            self._restore_targeting_snapshot(snapshot)
-            if action is not None:
-                candidates.append(self._score_action(env, ctx, action, source, base_score))
-        if ctx.defense_mode or ctx.last_stand or ctx.rebuild_mode:
-            fallback = _pressure_fallback_action(ctx)
-            if fallback is not None:
-                candidates.append(self._score_action(env, ctx, fallback, "pressure_fallback", 300))
-        return sorted(candidates, key=lambda candidate: (-candidate.score, candidate.source, candidate.action))
+        veto_helpers = VetoHelpers(
+            distance=_distance,
+            enemy_pressure_near_base=_enemy_pressure_near_base,
+            enemy_can_finish_base_next_turn=_enemy_can_finish_base_next_turn,
+            base_camp_targets=_base_camp_targets,
+        )
+        candidates, vetoes = rank_candidates(
+            env,
+            ctx,
+            self._candidate_sources(),
+            self._score_action,
+            lambda env, ctx, action, source: veto_action(
+                env,
+                ctx,
+                action,
+                source,
+                self._strategic_intent(ctx),
+                veto_helpers,
+            ),
+            pressure_fallback_action,
+            self._targeting_snapshot,
+            self._restore_targeting_snapshot,
+        )
+        self.last_vetoes = vetoes
+        return candidates
+
+    def _recovery_helpers(self) -> RecoveryHelpers:
+        return RecoveryHelpers(
+            actions_of_kind=_actions_of_kind,
+            attack_priority=_attack_priority,
+            base_camp_targets=_base_camp_targets,
+            distance=_distance,
+            enemy_can_finish_base_next_turn=_enemy_can_finish_base_next_turn,
+            legal_home_guard_action=_legal_home_guard_action,
+            ordered_workers=self._ordered_workers,
+            threat_score=_threat_score,
+            worker_retreat=self._choose_worker_retreat,
+        )
 
     def explain_last_decision(self) -> str:
         if self.last_decision is None:
+            if self.last_no_decision_reason:
+                if self.last_vetoes:
+                    return f"{self.last_no_decision_reason} | Vetoes: {'; '.join(self.last_vetoes)}"
+                return self.last_no_decision_reason
             return "No decision"
         reasons = ", ".join(self.last_decision.reasons)
         intent = ""
@@ -1467,6 +1429,19 @@ class HeuristicAgent:
             f"next {self.last_intent.next_action}; risk {self.last_intent.risk}"
         )
 
+    def _no_legal_actions_reason(self, env: AgeGridEnv, faction: str) -> str:
+        bank = env.bank[faction]
+        worker_cost = production.unit_cost(env, faction, "worker") or env.config.worker_spawn_cost
+        friendly_units = [unit for unit in env.units if unit.faction == faction]
+        base_hp = env.bases[faction].hp
+        if not friendly_units and bank < worker_cost:
+            return f"No legal actions: no units, bank {bank}/{worker_cost} for worker recovery"
+        if base_hp <= 0 and not friendly_units:
+            return f"No legal actions: base destroyed and no units remain"
+        if not friendly_units:
+            return "No legal actions: no units remain"
+        return "No legal actions"
+
     def _choose_research_action(self, env: AgeGridEnv, ctx: _Context) -> Action | None:
         if ctx.defense_mode or ctx.base_under_siege or ctx.siege_finish:
             return None
@@ -1482,21 +1457,43 @@ class HeuristicAgent:
         enemy_support = env.faction_state(ctx.enemy_faction).war_support
         direct_siege = bool(_base_camp_targets(env, ctx.faction)) or ctx.base_under_siege
         imminent_base_loss = _enemy_can_finish_base_next_turn(env, ctx.faction)
+        winning_finish = _winning_finish_window(env, ctx.faction, ctx.enemy_faction, ctx)
+        escape_needed = _peace_escape_needed(env, ctx.faction, ctx.enemy_faction, ctx)
         if ctx.accept_peace_actions:
+            accept_action = ctx.accept_peace_actions[0]
+            offerer = accept_action[1]
+            concessions = diplomacy.preview_peace_concessions(env, offerer, ctx.faction)
+            requested_indemnity = diplomacy.recommended_peace_indemnity(env, offerer, ctx.faction)
+            offered_indemnity = relation.pending_indemnity
+            meaningful_concession = concessions.has_concessions or offered_indemnity >= max(1, (requested_indemnity * 3) // 4)
             losing_war = (
                 ctx.home_enemy_force > ctx.home_friendly_force
                 or len(ctx.military) < max(1, len([u for u in env.units if u.faction == ctx.enemy_faction and u.attack_damage > 0]) // 2)
                 or env.bank[ctx.faction] < env.bank[ctx.enemy_faction] // 2
                 or war_support <= 35
             )
-            if losing_war and not ctx.siege_finish and not direct_siege and not imminent_base_loss:
-                return ctx.accept_peace_actions[0]
+            # Accepting peace is no longer just a panic button. A faction that
+            # is winning can accept surrender when the deal contains real
+            # concessions; a faction that is losing can still take a lifeline.
+            # But if we are ahead, stronger, and already threatening a damaged
+            # base, peace is treated as surrendering the finish window unless
+            # the army is exhausted or the war has genuinely stalled.
+            if (
+                (losing_war or meaningful_concession)
+                and not (winning_finish and not escape_needed)
+                and not (ctx.siege_finish and not escape_needed)
+                and not direct_siege
+                and not imminent_base_loss
+            ):
+                return accept_action
         if ctx.offer_peace_actions:
             war_turns = env.turn - relation.since_turn
             losing_score = env.war_score(ctx.faction, ctx.enemy_faction) <= env.war_score(ctx.enemy_faction, ctx.faction)
             if (
                 war_turns >= env.config.min_war_duration
                 and (ctx.last_stand or ctx.rebuild_mode or war_support <= 45 or losing_score)
+                and not (winning_finish and not escape_needed)
+                and not (ctx.siege_finish and not escape_needed)
                 and not direct_siege
                 and not imminent_base_loss
             ):
@@ -1624,6 +1621,12 @@ class HeuristicAgent:
 
     def _choose_resource_pressure_action(self, env: AgeGridEnv, ctx: _Context) -> Action | None:
         if not ctx.at_war or not ctx.military or ctx.base_under_siege:
+            return None
+        enemy_combat_exists = any(
+            enemy.faction == ctx.enemy_faction and enemy.attack_damage > 0
+            for enemy in env.units
+        )
+        if enemy_combat_exists and ctx.recovery_posture in {"critical", "fragile"} and not ctx.resource_contesters:
             return None
         if ctx.recovery_mode and ctx.military_gap >= 8 and ctx.home_enemy_force == 0:
             return None
@@ -1777,6 +1780,56 @@ class HeuristicAgent:
             build_action = _choose_build_action(env, ctx, "wall")
             if build_action is not None:
                 return build_action
+        enemy_force = _total_force(env, ctx.enemy_faction)
+        friendly_force = _total_force(env, ctx.faction)
+        enemy_archers = _unit_count(env, ctx.enemy_faction, "archer")
+        friendly_archers = _unit_count(env, ctx.faction, "archer")
+        enemy_static_defense = any(
+            building.faction == ctx.enemy_faction
+            and building.building_type in {"archer_tower", "ballista_tower", "wall", "stronghold"}
+            for building in env.buildings
+        )
+        fortify_home = (
+            ctx.defense_mode
+            or ctx.behind_mode
+            or ctx.recovery_mode
+            or ctx.home_enemy_force > 0
+            or env.bases[ctx.faction].hp < env.base_max_hp(ctx.faction)
+        )
+        siege_plan = (
+            ctx.push_mode
+            or ctx.siege_finish
+            or enemy_static_defense
+            or friendly_force >= enemy_force + 8
+        )
+        if (
+            "engineering" in ctx.state.techs_unlocked
+            and "siege_workshop" not in ctx.buildings
+            and (siege_plan or ("advanced_siege" in ctx.state.techs_unlocked and not ctx.behind_mode))
+        ):
+            build_action = _choose_build_action(env, ctx, "siege_workshop")
+            if build_action is not None:
+                return build_action
+        if fortify_home and "stronghold" in ctx.state.techs_unlocked and "stronghold" not in ctx.buildings:
+            build_action = _choose_build_action(env, ctx, "stronghold")
+            if build_action is not None:
+                return build_action
+        if "heavy_cavalry" in ctx.state.techs_unlocked and "stable" in ctx.buildings:
+            desired_heavy = 2
+            if ctx.push_mode or friendly_force < enemy_force or ctx.military_gap > 0:
+                desired_heavy = 3
+            desired = ("train", "heavy_cavalry")
+            if desired in ctx.legal and _unit_count(env, ctx.faction, "heavy_cavalry") < desired_heavy:
+                return desired
+        if "advanced_siege" in ctx.state.techs_unlocked and "siege_workshop" in ctx.buildings:
+            desired_ballista = 1
+            if siege_plan:
+                desired_ballista = 2
+            if enemy_static_defense or ctx.siege_finish:
+                desired_ballista = 3
+            desired = ("train", "ballista")
+            if desired in ctx.legal and _unit_count(env, ctx.faction, "ballista") < desired_ballista:
+                return desired
         if _unit_count(env, ctx.faction, "soldier") < 2:
             desired = ("train", "soldier")
             if desired in ctx.legal:
@@ -1786,10 +1839,6 @@ class HeuristicAgent:
             desired = ("train", "archer")
             if desired in ctx.legal:
                 return desired
-        enemy_force = _total_force(env, ctx.enemy_faction)
-        friendly_force = _total_force(env, ctx.faction)
-        enemy_archers = _unit_count(env, ctx.enemy_faction, "archer")
-        friendly_archers = _unit_count(env, ctx.faction, "archer")
         if not ctx.push_mode and (enemy_force > friendly_force or ctx.behind_mode):
             if enemy_archers > friendly_archers:
                 desired = ("train", "archer")
@@ -1811,26 +1860,14 @@ class HeuristicAgent:
             build_action = _choose_build_action(env, ctx, "ballista_tower")
             if build_action is not None:
                 return build_action
-        if (
-            "engineering" in ctx.state.techs_unlocked
-            and "siege_workshop" not in ctx.buildings
-            and (ctx.push_mode or not ctx.behind_mode or friendly_force >= enemy_force)
-        ):
-            build_action = _choose_build_action(env, ctx, "siege_workshop")
+        if "heavy_cavalry" in ctx.state.techs_unlocked and "stable" not in ctx.buildings:
+            build_action = _choose_build_action(env, ctx, "stable")
             if build_action is not None:
                 return build_action
-        if "stronghold" in ctx.state.techs_unlocked and "stronghold" not in ctx.buildings:
+        if not fortify_home and "stronghold" in ctx.state.techs_unlocked and "stronghold" not in ctx.buildings and env.bank[ctx.faction] >= 180:
             build_action = _choose_build_action(env, ctx, "stronghold")
             if build_action is not None:
                 return build_action
-        if "heavy_cavalry" in ctx.state.techs_unlocked and "stable" in ctx.buildings:
-            desired = ("train", "heavy_cavalry")
-            if desired in ctx.legal and _unit_count(env, ctx.faction, "heavy_cavalry") < 1:
-                return desired
-        if "advanced_siege" in ctx.state.techs_unlocked and "siege_workshop" in ctx.buildings:
-            desired = ("train", "ballista")
-            if desired in ctx.legal and _unit_count(env, ctx.faction, "ballista") < 1:
-                return desired
         return None
 
     def _choose_military_movement(self, env: AgeGridEnv, ctx: _Context) -> Action | None:
@@ -1861,6 +1898,30 @@ class HeuristicAgent:
                 recover_action = ("move_towards", unit.id, recover_target)
                 if recover_action in ctx.legal:
                     return recover_action
+            if (
+                (
+                    ctx.recovery_posture == "critical"
+                    or (ctx.recovery_posture == "fragile" and ctx.military_gap >= 5)
+                )
+                and not ctx.push_mode
+                and not ctx.siege_finish
+            ):
+                recovery_action = None
+                if defensive_targets:
+                    recovery_target = min(
+                        defensive_targets,
+                        key=lambda enemy: (_distance(unit.position, enemy.position), enemy.hp, enemy.id),
+                    ).position
+                    candidate_action = ("move_towards", unit.id, recovery_target)
+                    if candidate_action in ctx.legal:
+                        self._set_military_target(unit.id, recovery_target, lock=2)
+                        return candidate_action
+                else:
+                    recovery_action = _legal_home_guard_action(env, ctx, unit)
+                    recovery_target = recovery_action[2] if recovery_action is not None else None
+                if recovery_action is not None and recovery_target is not None and recovery_target != unit.position:
+                    self._set_military_target(unit.id, recovery_target, lock=2)
+                    return recovery_action
             if (
                 ctx.behind_mode
                 and role != "raider"
@@ -1925,7 +1986,15 @@ class HeuristicAgent:
             elif ctx.push_mode and role != "raider":
                 if target is None:
                     frontline_target = _frontline_target(env, ctx.faction, unit)
-                    if frontline_target is not None and _frontline_is_losing_locally(env, ctx.faction, frontline_target):
+                    commit_to_push = (
+                        frontline_target is not None
+                        and _army_committed_to_push(env, ctx.faction, frontline_target)
+                    )
+                    if (
+                        frontline_target is not None
+                        and _frontline_is_losing_locally(env, ctx.faction, frontline_target)
+                        and not commit_to_push
+                    ):
                         staging_target = _staging_target(env, ctx.faction, unit, ctx.rally_anchor)
                         if staging_target is not None:
                             staging_action = ("move_towards", unit.id, staging_target)
@@ -1984,6 +2053,7 @@ class HeuristicAgent:
                 and target is not None
                 and any(enemy.attack_damage > 0 for enemy in enemy_units)
                 and not _army_ready_to_push(env, ctx.faction, target, minimum_units=3 if ctx.behind_mode else 2)
+                and not _army_committed_to_push(env, ctx.faction, target, minimum_units=3 if ctx.behind_mode else 2)
             ):
                 staging_target = _staging_target(env, ctx.faction, unit, ctx.rally_anchor)
                 staging_action = None
@@ -2050,16 +2120,21 @@ class HeuristicAgent:
             self.last_decision = None
             self.last_candidates = []
             self.last_intent = None
+            self.last_vetoes = []
+            self.last_no_decision_reason = self._no_legal_actions_reason(env, faction)
             return None
         self._refresh_military_stall(env, faction)
         ctx = self._build_context(env, faction, legal)
         self.last_intent = self._strategic_intent(ctx)
+        self.last_no_decision_reason = None
         ranked = self._rank_candidates(env, ctx)
         self.last_candidates = ranked
         if ranked:
             selected = ranked[0]
             self.last_decision = selected
-            chooser = next((candidate_chooser for source, _, candidate_chooser in self._candidate_choosers() if source == selected.source), None)
+            source_by_name = source_lookup(self._candidate_sources())
+            source = source_by_name.get(selected.source)
+            chooser = source.chooser if source is not None else None
             action = selected.action
             if chooser is not None:
                 selected_snapshot = self._targeting_snapshot()
@@ -2070,9 +2145,27 @@ class HeuristicAgent:
                     self._restore_targeting_snapshot(selected_snapshot)
                 else:
                     action = resolved_action
-                    base_score = next(score for source, score, _ in self._candidate_choosers() if source == selected.source)
-                    self.last_decision = self._score_action(env, ctx, action, selected.source, base_score)
+                    self.last_decision = self._score_action(env, ctx, action, selected.source, source.base_score)
             self._record_worker_assignment(action, env, faction)
             return action
         self.last_decision = None
-        return None
+        self.last_no_decision_reason = "No ranked action survived heuristic filters"
+        if not (ctx.recovery_mode or ctx.rebuild_mode or ctx.last_stand):
+            return None
+        severe_peace_recovery = (
+            ctx.rebuild_mode
+            or ctx.last_stand
+            or ctx.military_gap >= 8
+            or ctx.economy_gap >= 8
+            or ctx.tech_deficit >= 2
+        )
+        if not ctx.at_war and not severe_peace_recovery:
+            return None
+        fallback = choose_survival_fallback(env, ctx, self._recovery_helpers())
+        if fallback is None:
+            return None
+        self.last_no_decision_reason = None
+        self.last_decision = self._score_action(env, ctx, fallback, "survival_fallback", 430)
+        self.last_candidates = [self.last_decision]
+        self._record_worker_assignment(fallback, env, faction)
+        return fallback

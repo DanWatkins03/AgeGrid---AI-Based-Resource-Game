@@ -300,7 +300,7 @@ def _train_option(env: AgeGridEnv, faction: str, unit_type: str) -> HumanActionO
         workers = [unit for unit in env.get_units_for_faction(faction) if unit.unit_type == "worker"]
         if len(workers) >= env.config.max_workers:
             return HumanActionOption(label=label, payload=payload, enabled=False, reason="Worker cap reached.")
-    occ = env._occupied_positions()
+    occ = env._unit_positions()
     if not any(env._in_bounds(pos) and pos not in occ for pos in hexgrid.neighbors(env.bases[faction].position)):
         return HumanActionOption(label=label, payload=payload, enabled=False, reason="Spawn tiles are blocked.")
     return HumanActionOption(label=label, payload=payload)

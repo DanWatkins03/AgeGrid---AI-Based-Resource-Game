@@ -10,11 +10,16 @@ def _approach_positions(target: Position, env) -> list[Position]:
 
 
 def _resolved_target(env, unit, target: Position) -> Position | None:
-    occupied = env._occupied_positions() - {unit.position}
-    if target not in occupied:
+    blocked = env._movement_blocked_positions(unit)
+    if target not in blocked:
         return target
 
-    candidates = [pos for pos in _approach_positions(target, env) if pos not in occupied]
+    approach_radius = max(1, getattr(unit, "attack_range", 0))
+    candidates = [
+        pos
+        for pos in hexgrid.positions_within(target, approach_radius, env.config.width, env.config.height)
+        if pos != target and pos not in blocked
+    ]
     if not candidates:
         return None
     return min(candidates, key=lambda pos: (hexgrid.distance(unit.position, pos), hexgrid.distance(pos, target)))
@@ -33,7 +38,7 @@ def move_unit(env, unit_id: int, direction: str) -> bool:
     new_pos = (unit.position[0] + dx, unit.position[1] + dy)
     if not env._in_bounds(new_pos):
         return False
-    if new_pos in env._occupied_positions():
+    if new_pos in env._movement_blocked_positions(unit):
         return False
     unit.position = new_pos
     return True
@@ -52,7 +57,7 @@ def can_move_unit(env, unit_id: int, direction: str) -> bool:
     new_pos = (unit.position[0] + dx, unit.position[1] + dy)
     if not env._in_bounds(new_pos):
         return False
-    if new_pos in env._occupied_positions():
+    if new_pos in env._movement_blocked_positions(unit):
         return False
     return True
 
@@ -67,7 +72,7 @@ def can_move_towards(env, unit_id: int, target: Position) -> bool:
 
     probe_position = unit.position
     steps = max(1, getattr(unit, "move_steps", 1))
-    blocked = env._occupied_positions() - {unit.position}
+    blocked = env._movement_blocked_positions(unit)
     for _ in range(steps):
         next_pos = hexgrid.connected_step_toward(
             probe_position,
@@ -99,7 +104,7 @@ def move_towards(env, unit_id: int, target: Position) -> bool:
             resolved_target,
             env.config.width,
             env.config.height,
-            env._occupied_positions() - {unit.position},
+            env._movement_blocked_positions(unit),
         )
         if next_pos is None:
             break

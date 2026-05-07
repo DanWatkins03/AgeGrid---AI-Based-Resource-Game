@@ -9,6 +9,8 @@ class FactionState:
     name: str
     resources: int = 0
     war_support: int = 100
+    war_support_cap: int = 100
+    war_support_cap_until_turn: int = 0
     techs_unlocked: set[str] = field(default_factory=set)
     tech_in_progress: str | None = None
     research_points: int = 0
@@ -17,14 +19,26 @@ class FactionState:
 
 
 @dataclass
+class PeaceConcessionState:
+    payer: str
+    receiver: str
+    reparations_per_turn: int = 0
+    reparations_until_turn: int = 0
+    war_support_cap: int = 100
+    war_support_cap_until_turn: int = 0
+
+
+@dataclass
 class RelationState:
     state: str = "peace"  # peace, war, truce
     since_turn: int = 0
     truce_until_turn: int = 0
     aggressor: str | None = None
+    failed_aggressor: str | None = None
     pending_peace_by: str | None = None
     pending_indemnity: int = 0
     war_score: dict[str, int] = field(default_factory=dict)
+    concessions: PeaceConcessionState | None = None
 
 
 class BankView(MutableMapping[str, int]):

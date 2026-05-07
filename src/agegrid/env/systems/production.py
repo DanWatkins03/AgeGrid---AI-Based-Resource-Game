@@ -154,7 +154,6 @@ BUILDING_DEFS: dict[str, BuildingDefinition] = {
     ),
 }
 
-
 def _apply_discount(cost: int, discount_pct: int) -> int:
     if discount_pct <= 0:
         return cost
@@ -273,7 +272,7 @@ def can_train_unit(env, faction: str, unit_type: str) -> bool:
     if unit_type == "worker" and len(workers) >= env.config.max_workers:
         return False
 
-    occ = env._occupied_positions()
+    occ = env._unit_positions()
     return any(env._in_bounds(pos) and pos not in occ for pos in _adjacent_spawn_positions(env, faction))
 
 
@@ -283,7 +282,7 @@ def train_unit(env, faction: str, unit_type: str) -> bool:
     if spec is None or cost is None or not can_train_unit(env, faction, unit_type):
         return False
 
-    occ = env._occupied_positions()
+    occ = env._unit_positions()
     for pos in _adjacent_spawn_positions(env, faction):
         if env._in_bounds(pos) and pos not in occ:
             env.faction_state(faction).resources -= cost
@@ -320,7 +319,7 @@ def can_build(env, faction: str, worker_id: int, building_type: str, pos: Positi
         return False
     if hexgrid.distance(worker.position, pos) != 1:
         return False
-    if not env._in_bounds(pos) or pos in env._occupied_positions() or pos in {b.position for b in env.buildings}:
+    if not env._in_bounds(pos) or pos in env._construction_blocked_positions(faction):
         return False
     if env.resource_at(pos) is not None:
         return False

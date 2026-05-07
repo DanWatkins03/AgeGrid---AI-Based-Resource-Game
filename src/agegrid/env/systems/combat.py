@@ -21,6 +21,45 @@ def _structure_attack_stats(env, building) -> tuple[int, int]:
     return damage, attack_range
 
 
+def base_assault_damage(env, attacker, target_faction: str) -> int:
+    target_base = env.bases[target_faction]
+    raw_damage = max(0, attacker.attack_damage)
+    if raw_damage <= 0:
+        return 0
+    if raw_damage >= 10 or target_base.hp <= raw_damage:
+        return min(raw_damage, target_base.hp)
+    if attacker.unit_type == "ballista":
+        return min(raw_damage, target_base.hp)
+    if attacker.attack_range > 1:
+        # Ranged units can contribute safe pressure, but arrows should not tear
+        # down a city at the same rate as dedicated siege.
+        return min(max(1, raw_damage // 2), target_base.hp)
+    # Ordinary melee units can chip, but the base absorbs part of the blow.
+    return min(max(1, raw_damage - 1), target_base.hp)
+
+
+def base_retaliation_damage_against_attacker(env, defender: str, attacker) -> int:
+    base = env.bases[defender]
+    if base.hp <= 0:
+        return 0
+    base_damage, base_range = _base_attack_stats(env, defender)
+    if _distance(base.position, attacker.position) <= base_range:
+        return base_damage
+    # Long-range bombardment is safer, not free.  This models garrison fire,
+    # sorties, and supply attrition without making siege impossible.
+    return env.config.base_siege_attrition_damage
+
+
+def _apply_base_retaliation(env, defender: str, attacker) -> None:
+    retaliation = base_retaliation_damage_against_attacker(env, defender, attacker)
+    if retaliation <= 0:
+        return
+    attacker.hp -= retaliation
+    if attacker.hp <= 0:
+        env.record_unit_casualty(defender, attacker.faction, attacker.unit_type)
+        env._remove_unit(attacker.id)
+
+
 def attack(env, faction: str, attacker_id: int, target_id: int) -> bool:
     attacker = env.get_unit(attacker_id)
     target = env.get_unit(target_id)
@@ -69,9 +108,13 @@ def attack_base(env, faction: str, attacker_id: int, target_faction: str) -> boo
     if distance > attacker.attack_range:
         return False
 
-    damage = min(attacker.attack_damage, target_base.hp)
-    target_base.hp = max(0, target_base.hp - attacker.attack_damage)
+    damage = base_assault_damage(env, attacker, target_faction)
+    if damage <= 0:
+        return False
+    target_base.hp = max(0, target_base.hp - damage)
     env.record_base_damage(attacker.faction, target_faction, damage)
+    if target_base.hp > 0:
+        _apply_base_retaliation(env, target_faction, attacker)
     return True
 
 

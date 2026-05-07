@@ -111,7 +111,13 @@ def _agent_decision_lines(agent) -> list[str]:
     summary = explain()
     if summary == "No decision":
         return [summary]
-    lines = [summary]
+    lines: list[str] = []
+    explain_intent = getattr(agent, "explain_last_intent", None)
+    if explain_intent is not None:
+        intent_summary = explain_intent()
+        if intent_summary != "-":
+            lines.append(f"Intent: {intent_summary}")
+    lines.append(summary)
     candidates = getattr(agent, "last_candidates", [])
     for candidate in candidates[1:3]:
         reasons = ", ".join(candidate.reasons)

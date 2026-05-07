@@ -5,7 +5,10 @@ import unittest
 import pygame
 
 from src.agegrid.agents.greedy import GreedyAgent
-from src.agegrid.agents.heuristic import HEURISTIC_PROFILES, HeuristicAgent, army_plan, heuristic_diagnostics
+from src.agegrid.agents.heuristic_arbitration import candidate_tiebreak_priority
+from src.agegrid.agents.heuristic import HEURISTIC_PROFILES, HeuristicAgent, army_plan, heuristic_diagnostics, unit_composition
+from src.agegrid.agents.heuristic_scoring import ScoringHelpers, utility_modifier
+from src.agegrid.agents.heuristic_strategy import StrategicIntent, UtilityCandidate
 from src.agegrid.agents.registry import create_agent
 from src.agegrid.env.agegrid_env import AgeGridEnv, GameConfig
 from src.agegrid.env.entities import ResourceNode
@@ -205,6 +208,44 @@ class ProductionSystemTests(unittest.TestCase):
         self.assertEqual(len(soldiers), 1)
         self.assertEqual(soldiers[0].attack_damage, 3)
 
+    def test_training_can_spawn_on_friendly_building_tiles(self) -> None:
+        env = make_env()
+        env.units = []
+        env._unit_index = {}
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+
+        spawn_ring = [pos for pos in hexgrid.neighbors(env.bases["Red"].position) if env._in_bounds(pos)]
+        for pos in spawn_ring:
+            env._spawn_building("Red", "storehouse", 18, pos)
+
+        self.assertTrue(production.can_train_unit(env, "Red", "worker"))
+        self.assertTrue(production.train_unit(env, "Red", "worker"))
+        worker = env.get_units_for_faction("Red")[0]
+        self.assertIn(worker.position, {building.position for building in env.get_buildings_for_faction("Red")})
+
+    def test_building_can_be_constructed_on_friendly_troop_tile(self) -> None:
+        env = make_env()
+        env.faction_state("Red").techs_unlocked.add("mining")
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        build_pos = (3, 1)
+        env._spawn_unit("Red", "soldier", 10, build_pos, attack_damage=3, attack_range=1)
+
+        self.assertTrue(production.can_build(env, "Red", worker.id, "storehouse", build_pos))
+        self.assertTrue(production.build(env, "Red", worker.id, "storehouse", build_pos))
+        self.assertTrue(any(building.position == build_pos for building in env.get_buildings_for_faction("Red")))
+        self.assertTrue(any(unit.position == build_pos for unit in env.get_units_for_faction("Red")))
+
+    def test_enemy_troops_block_construction(self) -> None:
+        env = make_env()
+        env.faction_state("Red").techs_unlocked.add("mining")
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        build_pos = (3, 1)
+        env._spawn_unit("Blue", "soldier", 10, build_pos, attack_damage=3, attack_range=1)
+
+        self.assertFalse(production.can_build(env, "Red", worker.id, "storehouse", build_pos))
+
     def test_storehouse_adds_income_on_owner_turn_end(self) -> None:
         env = make_env(target_bank=999)
         env.faction_state("Red").techs_unlocked.add("mining")
@@ -252,6 +293,24 @@ class ProductionSystemTests(unittest.TestCase):
 
         self.assertFalse(production.can_build(env, "Red", worker.id, "storehouse", (3, 1)))
         self.assertFalse(production.build(env, "Red", worker.id, "storehouse", (3, 1)))
+
+    def test_buildings_do_not_block_base_approach_lanes(self) -> None:
+        env = make_env(num_resource_nodes=0)
+        env.faction_state("Red").techs_unlocked.add("mining")
+        worker = next(u for u in env.units if u.faction == "Red" and u.unit_type == "worker")
+        red_base = env.bases["Red"].position
+        approaches = [pos for pos in hexgrid.neighbors(red_base) if env._in_bounds(pos)]
+        for pos in approaches[:-2]:
+            env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=pos)
+        blocked_pos = approaches[-2]
+        worker.position = next(
+            pos
+            for pos in hexgrid.neighbors(blocked_pos)
+            if env._in_bounds(pos) and pos not in env._occupied_positions() and env.resource_at(pos) is None
+        )
+
+        self.assertTrue(production.can_build(env, "Red", worker.id, "storehouse", blocked_pos))
+        self.assertTrue(production.build(env, "Red", worker.id, "storehouse", blocked_pos))
 
     def test_quarry_requires_visible_stone_resource(self) -> None:
         env = make_env(num_resource_nodes=0, stone_resource_nodes=2, stone_resource_amount=20, horse_resource_nodes=0)
@@ -371,6 +430,21 @@ class HeuristicAgentTests(unittest.TestCase):
 
         self.assertEqual(agent.act(env), ("declare_war", "Blue"))
 
+    def test_agent_explains_no_legal_actions_during_collapse_recovery(self) -> None:
+        env = make_env(collapse_enabled=False)
+        agent = HeuristicAgent()
+        env.declare_war("Red", "Blue")
+        env.units = [unit for unit in env.units if unit.faction != "Red"]
+        env.faction_states["Red"].unit_ids.clear()
+        env.bank["Red"] = env.config.worker_spawn_cost - 1
+
+        self.assertEqual(env.legal_actions("Red"), [])
+        self.assertIsNone(agent.act(env))
+        self.assertEqual(
+            agent.explain_last_decision(),
+            f"No legal actions: no units, bank {env.config.worker_spawn_cost - 1}/{env.config.worker_spawn_cost} for worker recovery",
+        )
+
     def test_agent_redeclares_war_under_border_pressure_even_if_enemy_support_is_higher(self) -> None:
         env = make_env(target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
@@ -478,6 +552,102 @@ class HeuristicAgentTests(unittest.TestCase):
         self.assertIsNotNone(action)
         self.assertEqual(action[0], "build")
         self.assertEqual(action[2], "archer_tower")
+
+    def test_agent_builds_siege_workshop_for_late_siege_plan(self) -> None:
+        env = make_env(width=14, height=14, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.bank["Red"] = 500
+        env.faction_state("Red").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "fletching", "construction", "iron", "steel", "engineering", "advanced_siege"}
+        )
+        env.faction_state("Red").tech_in_progress = "advanced_siege"
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Red", "soldier", 14, (2, 0), attack_damage=4, attack_range=1)
+        env._spawn_unit("Red", "soldier", 14, (2, 1), attack_damage=4, attack_range=1)
+        env._spawn_unit("Blue", "soldier", 10, (10, 10), attack_damage=3, attack_range=1)
+
+        action = agent.act(env)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "build")
+        self.assertEqual(action[2], "siege_workshop")
+
+    def test_agent_trains_multiple_ballistae_against_static_defense(self) -> None:
+        env = make_env(width=14, height=14, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.bank["Red"] = 500
+        env.faction_state("Red").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "fletching", "construction", "iron", "steel", "engineering", "advanced_siege"}
+        )
+        env.faction_state("Red").tech_in_progress = "advanced_siege"
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_building(faction="Red", building_type="quarry", hp=20, pos=(1, 2))
+        env._spawn_building(faction="Red", building_type="archer_tower", hp=22, pos=(2, 1))
+        env._spawn_building(faction="Red", building_type="ballista_tower", hp=28, pos=(3, 1))
+        env._spawn_building(faction="Red", building_type="siege_workshop", hp=24, pos=(3, 2))
+        env._spawn_unit("Red", "ballista", 10, (2, 2), attack_damage=5, attack_range=4)
+        env._spawn_building(faction="Blue", building_type="stronghold", hp=42, pos=(10, 10))
+
+        self.assertEqual(agent.act(env), ("train", "ballista"))
+
+    def test_agent_transitions_to_heavy_cavalry_core(self) -> None:
+        env = make_env(width=14, height=14, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.bank["Red"] = 500
+        env.faction_state("Red").techs_unlocked.update(
+            {"mining", "bronze", "animal_husbandry", "horseback_riding", "iron", "stirrups", "heavy_cavalry"}
+        )
+        env.faction_state("Red").tech_in_progress = "heavy_cavalry"
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_building(faction="Red", building_type="stable", hp=24, pos=(2, 0))
+        env._spawn_unit("Red", "heavy_cavalry", 16, (2, 2), attack_damage=5, attack_range=1, move_steps=3)
+
+        self.assertEqual(agent.act(env), ("train", "heavy_cavalry"))
+
+    def test_agent_fortifies_recovery_with_stronghold(self) -> None:
+        env = make_env(width=14, height=14, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.bank["Red"] = 500
+        env.bank["Blue"] = 800
+        env.faction_state("Red").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "construction", "iron", "fortify", "walls", "stronghold"}
+        )
+        env.faction_state("Blue").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "construction", "iron", "steel", "engineering", "currency"}
+        )
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_building(faction="Red", building_type="quarry", hp=20, pos=(2, 0))
+        env._spawn_building(faction="Red", building_type="archer_tower", hp=22, pos=(2, 1))
+        env._spawn_building(faction="Red", building_type="ballista_tower", hp=28, pos=(3, 1))
+        env._spawn_building(faction="Red", building_type="wall", hp=34, pos=(1, 2))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Blue", "soldier", 14, (10, 10), attack_damage=5, attack_range=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 11), attack_damage=5, attack_range=1)
+
+        action = agent.act(env)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "build")
+        self.assertEqual(action[2], "stronghold")
+
+    def test_unit_composition_reports_late_game_units(self) -> None:
+        env = make_env()
+        env._spawn_unit("Red", "heavy_cavalry", 16, (2, 2), attack_damage=5, attack_range=1, move_steps=3)
+        env._spawn_unit("Red", "ballista", 10, (2, 3), attack_damage=5, attack_range=4)
+
+        composition = unit_composition(env, "Red")
+
+        self.assertEqual(composition["heavy_cavalry"], 1)
+        self.assertEqual(composition["ballista"], 1)
 
     def test_threat_map_scores_enemy_threat_and_friendly_cover(self) -> None:
         env = make_env(width=12, height=12, target_bank=999)
@@ -697,7 +867,7 @@ class HeuristicAgentTests(unittest.TestCase):
         env._spawn_unit("Red", "worker", 5, (1, 0))
         env._spawn_unit("Red", "soldier", 10, (3, 3), attack_damage=3, attack_range=1, move_steps=1)
         env._spawn_unit("Blue", "worker", 5, (6, 5))
-        env.turn = env.config.worker_peace_until_turn
+        env.turn = 120
         env.bank["Red"] = 12
         env.declare_war("Red", "Blue")
         env.bank["Red"] = 0
@@ -783,7 +953,7 @@ class HeuristicAgentTests(unittest.TestCase):
         action = agent.act(env)
         self.assertEqual(action, ("attack", red_soldier.id, next(u.id for u in env.units if u.faction == "Blue" and u.unit_type == "soldier")))
 
-    def test_base_siege_does_not_fallback_to_worker_wandering_when_no_defender_exists(self) -> None:
+    def test_base_siege_worker_fallback_retreats_to_passable_base(self) -> None:
         env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
         env.resources = [ResourceNode(id=1, position=(0, 11), abundance=60)]
@@ -802,7 +972,7 @@ class HeuristicAgentTests(unittest.TestCase):
 
         action = agent.act(env)
 
-        self.assertIsNone(action)
+        self.assertEqual(action, ("move_towards", 1, env.bases["Red"].position))
 
     def test_agent_trains_defender_when_enemy_pressure_approaches_base(self) -> None:
         env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
@@ -866,6 +1036,32 @@ class HeuristicAgentTests(unittest.TestCase):
         self.assertIn("research:mining", agent.explain_last_decision())
         self.assertIn("Intent develop", agent.explain_last_decision())
 
+    def test_candidate_tiebreak_prefers_military_movement_over_equal_gather(self) -> None:
+        gather = UtilityCandidate(
+            action=("gather", 1),
+            source="economy",
+            score=540,
+            reasons=("recover", "income_now"),
+        )
+        movement = UtilityCandidate(
+            action=("move_towards", 2, (10, 10)),
+            source="military_movement",
+            score=540,
+            reasons=("recover", "move:soldier", "military_positioning"),
+        )
+
+        ranked = sorted(
+            [gather, movement],
+            key=lambda candidate: (
+                -candidate.score,
+                candidate_tiebreak_priority(candidate),
+                candidate.source,
+                candidate.action,
+            ),
+        )
+
+        self.assertEqual(ranked[0], movement)
+
     def test_recovery_intent_avoids_deep_resource_pressure_when_far_behind(self) -> None:
         env = make_env(width=14, height=14, target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
@@ -889,6 +1085,350 @@ class HeuristicAgentTests(unittest.TestCase):
 
         self.assertTrue(ctx.recovery_mode)
         self.assertIsNone(agent._choose_resource_pressure_action(env, ctx))
+
+    def test_push_intent_overrides_moderate_recovery_gap_when_pressure_is_live(self) -> None:
+        env = make_env(width=14, height=14, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(10, 10), abundance=60)]
+        env.turn = env.config.worker_peace_until_turn
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 2))
+        env._spawn_unit("Red", "soldier", 10, (8, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (9, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "worker", 5, (10, 10))
+        env._spawn_unit("Blue", "worker", 5, (11, 10))
+        env._spawn_unit("Blue", "worker", 5, (10, 11))
+        env.bank["Red"] = 12
+        env.bank["Blue"] = 120
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 0
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        self.assertTrue(ctx.recovery_mode)
+        self.assertTrue(ctx.push_mode)
+        self.assertEqual(ctx.recovery_posture, "fragile")
+        self.assertEqual(agent._strategic_intent(ctx).name, "push")
+
+        action = agent.act(env)
+        self.assertIsNotNone(action)
+        self.assertIn(action[0], {"attack", "move_towards"})
+        self.assertIn("Intent push", agent.explain_last_decision())
+
+    def test_recovery_scoring_prefers_war_pressure_over_gathering_when_ahead(self) -> None:
+        env = make_env(width=14, height=14)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(1, 2), abundance=60)]
+        env.turn = env.config.worker_peace_until_turn
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 2))
+        env._spawn_unit("Red", "soldier", 10, (8, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (9, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "worker", 5, (10, 10))
+        env._spawn_unit("Blue", "worker", 5, (11, 10))
+        env._spawn_unit("Blue", "worker", 5, (10, 11))
+        env.bank["Red"] = 12
+        env.bank["Blue"] = 120
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 0
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        gather_action = next(action for action in ctx.legal if action[0] == "gather")
+        pressure_action = next(
+            action
+            for action in ctx.legal
+            if action[0] == "move_towards"
+            and any(unit.id == action[1] and unit.attack_damage > 0 for unit in ctx.military)
+            and hexgrid.distance(action[2], env.bases["Blue"].position) <= 3
+        )
+        helpers = ScoringHelpers(
+            distance=hexgrid.distance,
+            enemy_pressure_near_base=lambda _env, _faction: False,
+            enemy_can_finish_base_next_turn=lambda _env, _faction: False,
+            hold_defender_reserve=lambda _env, _ctx, _spend: False,
+            unit_count=lambda _env, faction, unit_type: sum(
+                1 for unit in _env.units if unit.faction == faction and unit.unit_type == unit_type
+            ),
+        )
+        recovery_intent = StrategicIntent("recover", "moderate economy gap", "stabilize", "medium")
+
+        self.assertTrue(ctx.recovery_mode)
+        self.assertTrue(ctx.at_war)
+        self.assertTrue(ctx.push_mode)
+        self.assertGreater(
+            utility_modifier(env, ctx, pressure_action, recovery_intent, helpers),
+            utility_modifier(env, ctx, gather_action, recovery_intent, helpers),
+        )
+
+    def test_nonterminal_gathering_loses_to_military_pressure_when_ahead(self) -> None:
+        env = make_env(width=14, height=14)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(1, 2), abundance=60)]
+        env.turn = env.config.worker_peace_until_turn
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 2))
+        env._spawn_unit("Red", "soldier", 10, (8, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (9, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "worker", 5, (10, 10))
+        env._spawn_unit("Blue", "worker", 5, (11, 10))
+        env.bank["Red"] = 12
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 0
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        gather_action = next(action for action in ctx.legal if action[0] == "gather")
+        pressure_action = next(
+            action
+            for action in ctx.legal
+            if action[0] == "move_towards"
+            and any(unit.id == action[1] and unit.attack_damage > 0 for unit in ctx.military)
+            and hexgrid.distance(action[2], env.bases["Blue"].position) <= 3
+        )
+        helpers = ScoringHelpers(
+            distance=hexgrid.distance,
+            enemy_pressure_near_base=lambda _env, _faction: False,
+            enemy_can_finish_base_next_turn=lambda _env, _faction: False,
+            hold_defender_reserve=lambda _env, _ctx, _spend: False,
+            unit_count=lambda _env, faction, unit_type: sum(
+                1 for unit in _env.units if unit.faction == faction and unit.unit_type == unit_type
+            ),
+        )
+        push_intent = StrategicIntent("push", "safe army advantage", "pressure frontline", "medium")
+
+        self.assertIsNone(env.config.target_bank)
+        self.assertGreater(
+            utility_modifier(env, ctx, pressure_action, push_intent, helpers),
+            utility_modifier(env, ctx, gather_action, push_intent, helpers),
+        )
+
+    def test_nonterminal_gathering_stays_useful_for_immediate_war_purchase(self) -> None:
+        env = make_env(width=14, height=14)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(1, 2), abundance=60)]
+        env.turn = env.config.worker_peace_until_turn
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update(
+            {"mining", "bronze", "masonry", "fletching", "construction", "iron", "steel", "engineering", "advanced_siege"}
+        )
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_building(faction="Red", building_type="siege_workshop", hp=24, pos=(2, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 2))
+        env._spawn_unit("Red", "soldier", 10, (8, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (9, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "worker", 5, (10, 10))
+        env.bank["Red"] = 12
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 47
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        gather_action = next(action for action in ctx.legal if action[0] == "gather")
+        helpers = ScoringHelpers(
+            distance=hexgrid.distance,
+            enemy_pressure_near_base=lambda _env, _faction: False,
+            enemy_can_finish_base_next_turn=lambda _env, _faction: False,
+            hold_defender_reserve=lambda _env, _ctx, _spend: False,
+            unit_count=lambda _env, faction, unit_type: sum(
+                1 for unit in _env.units if unit.faction == faction and unit.unit_type == unit_type
+            ),
+        )
+        push_intent = StrategicIntent("push", "safe army advantage", "pressure frontline", "medium")
+
+        self.assertIsNone(env.config.target_bank)
+        self.assertNotIn(("train", "ballista"), ctx.legal)
+        self.assertGreaterEqual(utility_modifier(env, ctx, gather_action, push_intent, helpers), -30)
+
+    def test_fragile_recovery_keeps_lone_defender_near_home(self) -> None:
+        env = make_env(width=14, height=14)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "iron", "steel", "fletching"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Red", "soldier", 10, (7, 6), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 10), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 11), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "archer", 9, (11, 10), attack_damage=3, attack_range=4, move_steps=1)
+        env._spawn_unit("Blue", "worker", 5, (11, 11))
+        env.bank["Red"] = 0
+        env.bank["Blue"] = 300
+        env.declare_war("Red", "Blue")
+        red_soldier = next(unit for unit in env.units if unit.faction == "Red" and unit.unit_type == "soldier")
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        self.assertEqual(ctx.recovery_posture, "critical")
+
+        action = agent.act(env)
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "move_towards")
+        self.assertEqual(action[1], red_soldier.id)
+        self.assertLessEqual(hexgrid.distance(action[2], env.bases["Red"].position), 2)
+        self.assertIn("recovery_posture:critical", agent.explain_last_decision())
+
+    def test_recovery_fallback_acts_when_ranked_candidates_are_filtered_out(self) -> None:
+        env = make_env(width=14, height=14)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "iron", "steel", "fletching"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Red", "soldier", 10, (7, 6), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 10), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 11), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "archer", 9, (11, 10), attack_damage=3, attack_range=4, move_steps=1)
+        env.bank["Blue"] = 300
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 0
+
+        agent._rank_candidates = lambda _env, _ctx: []
+
+        action = agent.act(env)
+
+        self.assertIsNotNone(action)
+        self.assertIn(action, env.legal_actions("Red"))
+        self.assertIn("survival_fallback chose", agent.explain_last_decision())
+
+    def test_peace_recovery_fallback_acts_when_ranked_candidates_are_filtered_out(self) -> None:
+        env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(2, 2), abundance=60)]
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "iron", "steel", "fletching"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Blue", "soldier", 14, (10, 10), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 11), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "archer", 9, (11, 10), attack_damage=3, attack_range=4, move_steps=1)
+        env.bank["Red"] = 100
+        env.bank["Blue"] = 300
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        self.assertTrue(ctx.recovery_mode)
+        self.assertFalse(ctx.at_war)
+
+        agent._rank_candidates = lambda _env, _ctx: []
+        action = agent.act(env)
+
+        self.assertEqual(action, ("train", "soldier"))
+        self.assertIn("survival_fallback chose", agent.explain_last_decision())
+
+    def test_critical_recovery_fallback_trains_before_gathering(self) -> None:
+        env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(2, 2), abundance=60)]
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "iron", "steel", "fletching"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "worker", 5, (2, 2))
+        env._spawn_unit("Blue", "soldier", 14, (10, 10), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "soldier", 14, (10, 11), attack_damage=5, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "archer", 9, (11, 10), attack_damage=3, attack_range=4, move_steps=1)
+        env.bank["Blue"] = 300
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 100
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        self.assertEqual(ctx.recovery_posture, "critical")
+        self.assertIn(("gather", 1), env.legal_actions("Red"))
+        self.assertIn(("train", "soldier"), env.legal_actions("Red"))
+
+        agent._rank_candidates = lambda _env, _ctx: []
+        action = agent.act(env)
+
+        self.assertEqual(action, ("train", "soldier"))
+        self.assertIn("survival_fallback chose", agent.explain_last_decision())
+
+    def test_last_stand_gathers_only_when_it_immediately_buys_defender(self) -> None:
+        env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(1, 1), abundance=60)]
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(2, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 1))
+        env._spawn_unit("Blue", "archer", 8, (3, 2), attack_damage=3, attack_range=3)
+        env.bank["Blue"] = 300
+        env.declare_war("Blue", "Red")
+        env.bank["Red"] = 25
+
+        action = agent.act(env)
+        self.assertEqual(action, ("gather", 1))
+        self.assertTrue(env.apply_action(action)[0])
+
+        action = agent.act(env)
+        self.assertEqual(action, ("train", "soldier"))
+
+    def test_last_stand_worker_evades_instead_of_busywork_gathering(self) -> None:
+        env = make_env(width=14, height=14, num_resource_nodes=0, target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = [ResourceNode(id=1, position=(1, 1), abundance=60)]
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(2, 0))
+        env._spawn_unit("Red", "worker", 5, (1, 1))
+        env._spawn_unit("Blue", "archer", 8, (3, 2), attack_damage=3, attack_range=3)
+        env.bank["Blue"] = 300
+        env.declare_war("Blue", "Red")
+        env.bank["Red"] = 0
+
+        action = agent.act(env)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "move_towards")
+        self.assertNotEqual(action[2], env.bases["Red"].position)
+        self.assertEqual(threat.build_threat_map(env, "Red").danger_at(action[2]), 0)
 
     def test_debug_snapshot_includes_ai_decision_reasoning(self) -> None:
         env = make_env()
@@ -1213,6 +1753,25 @@ class HeuristicAgentTests(unittest.TestCase):
         action = agent.act(env)
         self.assertNotEqual(action, ("attack_base", red_soldier.id, "Blue"))
 
+    def test_agent_allows_supported_siege_unit_to_chip_base(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.turn = env.config.base_peace_until_turn
+        env.resources = []
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env._spawn_unit("Red", "ballista", 10, (8, 9), attack_damage=5, attack_range=4, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (8, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env.bank["Red"] = 12
+        env.declare_war("Red", "Blue")
+        env.bank["Red"] = 0
+        ballista = next(u for u in env.units if u.faction == "Red" and u.unit_type == "ballista")
+
+        self.assertGreater(env.bases["Blue"].hp, ballista.attack_damage)
+        self.assertEqual(agent.act(env), ("attack_base", ballista.id, "Blue"))
+
     def test_agent_trains_line_reinforcement_before_horseman_when_behind_ranged_enemy(self) -> None:
         env = make_env(target_bank=999)
         agent = HeuristicAgent(desired_workers=1)
@@ -1423,6 +1982,35 @@ class HeuristicAgentTests(unittest.TestCase):
         acting_unit = next(u for u in env.units if u.id == action[1])
         if acting_unit.unit_type != "horseman":
             self.assertNotEqual(action[2], (9, 10))
+
+    def test_staged_army_commits_when_global_push_window_is_favorable(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.bank["Red"] = 0
+        env.bank["Blue"] = 0
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env.faction_state("Red").techs_unlocked.update({"mining", "bronze"})
+        env.faction_state("Blue").techs_unlocked.update({"mining", "bronze", "fletching"})
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env._spawn_building(faction="Red", building_type="barracks", hp=30, pos=(1, 0))
+        env._spawn_unit("Red", "soldier", 10, (6, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (6, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (7, 9), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (7, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Blue", "archer", 8, (9, 10), attack_damage=3, attack_range=3, move_steps=1)
+        env._spawn_unit("Blue", "archer", 8, (10, 10), attack_damage=3, attack_range=3, move_steps=1)
+        env.declare_war("Red", "Blue")
+
+        ctx = agent._build_context(env, "Red", env.legal_actions("Red"))
+        action = agent._choose_military_movement(env, ctx)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action[0], "move_towards")
+        self.assertEqual(action[2], (9, 10))
 
     def test_agent_breaks_out_of_stalled_military_target_loop(self) -> None:
         env = make_env(target_bank=999)
@@ -1686,6 +2274,135 @@ class CombatAndVictoryTests(unittest.TestCase):
         self.assertEqual(env.bank["Red"], red_before - 20)
         self.assertEqual(env.bank["Blue"], blue_before + 20)
 
+    def test_legal_peace_offer_scales_indemnity_with_war_outcome(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = 12
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        relation = env.relation_state("Red", "Blue")
+        env.turn = 36
+        env.bank["Red"] = 300
+        env.bases["Red"].hp = 12
+        relation.war_score = {"Red": 2, "Blue": 20}
+
+        offer = next(action for action in env.legal_actions("Red") if action[0] == "offer_peace")
+
+        self.assertEqual(offer[1], "Blue")
+        self.assertGreater(offer[2], env.config.peace_indemnity_base)
+        self.assertLessEqual(offer[2], env.bank["Red"] * env.config.peace_indemnity_max_bank_pct // 100)
+
+    def test_scaled_peace_indemnity_respects_bank_cap(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = 12
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        relation = env.relation_state("Red", "Blue")
+        env.turn = 48
+        env.bank["Red"] = 50
+        env.bases["Red"].hp = 1
+        relation.war_score = {"Red": 0, "Blue": 80}
+
+        offer = next(action for action in env.legal_actions("Red") if action[0] == "offer_peace")
+
+        self.assertEqual(offer[2], env.bank["Red"] * env.config.peace_indemnity_max_bank_pct // 100)
+
+    def test_losing_peace_applies_reparations_and_war_support_cap(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = 12
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        relation = env.relation_state("Red", "Blue")
+        env.turn = 18
+        env.bank["Red"] = 100
+        env.faction_state("Red").war_support = 90
+        env.faction_state("Red").techs_unlocked.add("mining")
+        env._spawn_building(faction="Red", building_type="storehouse", hp=18, pos=(0, 2))
+        env.bases["Red"].hp = 12
+        relation.war_score = {"Red": 2, "Blue": 22}
+        self.assertTrue(env.offer_peace("Red", "Blue", 30))
+
+        self.assertEqual(env.accept_peace("Blue", "Red"), 30)
+
+        concessions = env.relation_state("Red", "Blue").concessions
+        self.assertIsNotNone(concessions)
+        self.assertEqual(concessions.payer, "Red")
+        self.assertEqual(concessions.receiver, "Blue")
+        self.assertGreater(concessions.reparations_per_turn, 0)
+        self.assertEqual(env.faction_state("Red").war_support, env.config.concession_war_support_cap)
+
+        red_before = env.bank["Red"]
+        blue_before = env.bank["Blue"]
+        env.step_end_turn()
+
+        self.assertEqual(env.bank["Red"], red_before - concessions.reparations_per_turn + env._passive_income_for("Red"))
+        self.assertEqual(env.bank["Blue"], blue_before + concessions.reparations_per_turn)
+        self.assertIn("paid", " | ".join(env.current_events + env.recent_events))
+
+    def test_agent_accepts_surrender_when_offer_contains_concessions(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.turn = 12
+        self.assertTrue(env.declare_war("Blue", "Red"))
+        relation = env.relation_state("Red", "Blue")
+        env.turn = 20
+        env.bases["Blue"].hp = 12
+        env._spawn_unit("Red", "soldier", 10, (4, 4), attack_damage=3, attack_range=1)
+        relation.war_score = {"Red": 24, "Blue": 4}
+        self.assertTrue(env.offer_peace("Blue", "Red", 40))
+
+        action = agent.act(env)
+
+        self.assertEqual(action, ("accept_peace", "Blue"))
+
+    def test_agent_refuses_peace_when_winning_and_base_is_reachable(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.turn = 24
+        env.bank["Red"] = 120
+        env.bank["Blue"] = 120
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._spawn_unit("Red", "soldier", 10, (10, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "archer", 8, (9, 10), attack_damage=3, attack_range=3, move_steps=1)
+        env._spawn_unit("Red", "soldier", 10, (10, 9), attack_damage=3, attack_range=1, move_steps=1)
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        env.bank["Red"] = 0
+        relation = env.relation_state("Red", "Blue")
+        relation.since_turn = 0
+        relation.war_score = {"Red": 24, "Blue": 2}
+        env.bases["Blue"].hp = 14
+        self.assertTrue(env.offer_peace("Blue", "Red", 50))
+
+        action = agent.act(env)
+
+        self.assertIsNotNone(action)
+        self.assertNotEqual(action[0], "accept_peace")
+        self.assertIn(action[0], {"attack_base", "move_towards"})
+
+    def test_agent_can_accept_peace_when_winning_but_war_support_is_exhausted(self) -> None:
+        env = make_env(target_bank=999)
+        agent = HeuristicAgent(desired_workers=1)
+        env.resources = []
+        env.turn = 24
+        env.bank["Red"] = 120
+        env.bank["Blue"] = 120
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._spawn_unit("Red", "soldier", 10, (10, 10), attack_damage=3, attack_range=1, move_steps=1)
+        env._spawn_unit("Red", "archer", 8, (9, 10), attack_damage=3, attack_range=3, move_steps=1)
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        env.bank["Red"] = 0
+        env.faction_state("Red").war_support = 10
+        relation = env.relation_state("Red", "Blue")
+        relation.since_turn = 0
+        relation.war_score = {"Red": 24, "Blue": 2}
+        env.bases["Blue"].hp = 14
+        self.assertTrue(env.offer_peace("Blue", "Red", 50))
+
+        action = agent.act(env)
+
+        self.assertEqual(action, ("accept_peace", "Blue"))
+
     def test_failed_aggressor_peace_applies_support_penalty_and_relief(self) -> None:
         env = make_env(target_bank=999)
         env.turn = 12
@@ -1697,9 +2414,28 @@ class CombatAndVictoryTests(unittest.TestCase):
         indemnity = env.accept_peace("Blue", "Red")
 
         self.assertEqual(indemnity, 20)
-        self.assertEqual(env.faction_state("Red").war_support, 79)
+        self.assertEqual(env.faction_state("Red").war_support, 63)
         self.assertEqual(env.faction_state("Blue").war_support, 89)
         self.assertEqual(env.relation_state("Red", "Blue").aggressor, None)
+        self.assertEqual(env.relation_state("Red", "Blue").failed_aggressor, "Red")
+        self.assertEqual(env.relation_state("Red", "Blue").truce_until_turn, env.turn + env.config.truce_turns)
+
+    def test_failed_aggressor_does_not_recover_war_support_during_truce(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = 12
+        env.faction_state("Blue").war_support = 80
+        self.assertTrue(env.declare_war("Red", "Blue"))
+        env.turn = 18
+        self.assertTrue(env.offer_peace("Red", "Blue", 20))
+        self.assertEqual(env.accept_peace("Blue", "Red"), 20)
+        red_support = env.faction_state("Red").war_support
+        blue_support = env.faction_state("Blue").war_support
+
+        env.step_end_turn()
+        env.step_end_turn()
+
+        self.assertEqual(env.faction_state("Red").war_support, red_support)
+        self.assertEqual(env.faction_state("Blue").war_support, blue_support + env.config.peace_support_recovery_per_turn)
 
     def test_war_upkeep_and_support_drain_apply_each_turn(self) -> None:
         env = make_env(target_bank=999)
@@ -1855,6 +2591,64 @@ class CombatAndVictoryTests(unittest.TestCase):
         self.assertTrue(combat.attack_base(env, "Red", attacker.id, "Blue"))
         self.assertEqual(env.bases["Blue"].hp, 0)
         self.assertFalse(combat.attack_base(env, "Red", attacker.id, "Blue"))
+
+    def test_single_basic_unit_cannot_solo_healthy_base(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = env.config.base_peace_until_turn
+        env.declare_war("Red", "Blue")
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env._spawn_unit("Red", "soldier", 10, (10, 9), attack_damage=3, attack_range=1, move_steps=1)
+        attacker = next(u for u in env.units if u.faction == "Red")
+
+        while combat.attack_base(env, "Red", attacker.id, "Blue"):
+            if env.get_unit(attacker.id) is None:
+                break
+
+        self.assertIsNone(env.get_unit(attacker.id))
+        self.assertGreater(env.bases["Blue"].hp, 0)
+
+    def test_single_archer_cannot_destroy_base_for_free(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = env.config.base_peace_until_turn
+        env.declare_war("Red", "Blue")
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env._spawn_unit("Red", "archer", 8, (7, 10), attack_damage=3, attack_range=3, move_steps=1)
+        attacker = next(u for u in env.units if u.faction == "Red")
+
+        self.assertEqual(hexgrid.distance(attacker.position, env.bases["Blue"].position), 3)
+        while combat.attack_base(env, "Red", attacker.id, "Blue"):
+            if env.get_unit(attacker.id) is None:
+                break
+
+        self.assertIsNone(env.get_unit(attacker.id))
+        self.assertGreater(env.bases["Blue"].hp, 0)
+
+    def test_siege_damages_base_better_than_archer_but_takes_attrition(self) -> None:
+        env = make_env(target_bank=999)
+        env.turn = env.config.base_peace_until_turn
+        env.declare_war("Red", "Blue")
+        env.units = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+        env._spawn_unit("Red", "archer", 8, (7, 10), attack_damage=3, attack_range=3, move_steps=1)
+        env._spawn_unit("Red", "ballista", 10, (6, 10), attack_damage=5, attack_range=4, move_steps=1)
+        archer = next(u for u in env.units if u.unit_type == "archer")
+        ballista = next(u for u in env.units if u.unit_type == "ballista")
+
+        self.assertTrue(combat.attack_base(env, "Red", archer.id, "Blue"))
+        hp_after_archer = env.bases["Blue"].hp
+        env.bases["Blue"].hp = env.config.base_hp
+        self.assertTrue(combat.attack_base(env, "Red", ballista.id, "Blue"))
+
+        self.assertLess(env.bases["Blue"].hp, hp_after_archer)
+        self.assertEqual(ballista.hp, 10 - env.config.base_siege_attrition_damage)
 
     def test_step_faction_stops_when_winner_is_found(self) -> None:
         env = make_env(target_bank=999)
@@ -2091,6 +2885,38 @@ class UiAssetScalingTests(unittest.TestCase):
 
 
 class MovementSystemTests(unittest.TestCase):
+    def test_units_can_move_onto_building_tiles(self) -> None:
+        env = make_env()
+        env.units = []
+        env._unit_index = {}
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+
+        env._spawn_building("Red", "storehouse", 18, (3, 1))
+        env._spawn_unit("Red", "soldier", 10, (4, 1), attack_damage=3, attack_range=1)
+
+        soldier = env.get_units_for_faction("Red")[0]
+        self.assertTrue(movement.can_move_unit(env, soldier.id, "west"))
+        self.assertTrue(movement.move_unit(env, soldier.id, "west"))
+        self.assertEqual(soldier.position, (3, 1))
+
+    def test_move_towards_paths_through_building_tiles(self) -> None:
+        env = make_env()
+        env.units = []
+        env._unit_index = {}
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+
+        env._spawn_building("Blue", "wall", 34, (2, 1))
+        env._spawn_unit("Red", "soldier", 10, (1, 1), attack_damage=3, attack_range=1)
+
+        soldier = env.get_units_for_faction("Red")[0]
+        self.assertTrue(movement.can_move_towards(env, soldier.id, (4, 1)))
+        self.assertTrue(movement.move_towards(env, soldier.id, (4, 1)))
+        self.assertEqual(soldier.position, (2, 1))
+
     def test_move_towards_routes_around_blocker(self) -> None:
         env = make_env()
         env.units = []
@@ -2140,6 +2966,29 @@ class MovementSystemTests(unittest.TestCase):
         self.assertTrue(movement.move_towards(env, soldier.id, env.bases["Blue"].position))
         self.assertNotEqual(soldier.position, env.bases["Blue"].position)
         self.assertEqual(soldier.position, (9, 10))
+
+    def test_ranged_unit_moves_to_firing_tile_when_base_approaches_are_blocked(self) -> None:
+        env = make_env(width=14, height=14)
+        env.units = []
+        env.buildings = []
+        env.faction_states["Red"].unit_ids.clear()
+        env.faction_states["Blue"].unit_ids.clear()
+        env._next_unit_id = 1
+
+        blue_base = env.bases["Blue"].position
+        for pos in hexgrid.neighbors(blue_base):
+            if env._in_bounds(pos):
+                env._spawn_building(faction="Blue", building_type="storehouse", hp=18, pos=pos)
+        env._spawn_unit("Red", "ballista", 10, (7, 10), attack_damage=5, attack_range=4)
+
+        ballista = next(u for u in env.units if u.faction == "Red" and u.unit_type == "ballista")
+        self.assertTrue(movement.can_move_towards(env, ballista.id, blue_base))
+        for _ in range(4):
+            self.assertTrue(movement.move_towards(env, ballista.id, blue_base))
+            if hexgrid.distance(ballista.position, blue_base) <= ballista.attack_range:
+                break
+        self.assertLessEqual(hexgrid.distance(ballista.position, blue_base), ballista.attack_range)
+        self.assertNotIn(ballista.position, {building.position for building in env.buildings})
 
     def test_repeated_move_towards_frontline_makes_real_progress(self) -> None:
         env = make_env(width=14, height=14)

@@ -27,7 +27,11 @@ class GameConfig:
     max_attempts_per_turn: int = 10
     base_hp: int = 30
     base_attack_damage: int = 2
-    base_attack_range: int = 2
+    base_attack_range: int = 3
+    # Bases should behave like defended cities.  Units outside the direct
+    # firing radius can still suffer light garrison attrition while damaging
+    # the base, so ranged chip is safer than melee but never completely free.
+    base_siege_attrition_damage: int = 1
     masonry_base_attack_bonus: int = 1
     starting_resources: int = 30
     num_resource_nodes: int = 8
@@ -47,7 +51,9 @@ class GameConfig:
     collapse_enabled: bool = True
     min_war_duration: int = 6
     peace_offer_min_turns: int = 4
-    truce_turns: int = 8
+    # Peace after a war should create a real cooldown, not a brief pause before
+    # the same aggressor can immediately rebuild support and restart fighting.
+    truce_turns: int = 20
     peace_indemnity_base: int = 24
     war_declaration_cost: int = 8
     war_declaration_support_penalty: int = 10
@@ -55,10 +61,40 @@ class GameConfig:
     war_upkeep_per_turn: int = 2
     war_upkeep_aggressor_bonus: int = 1
     war_support_drain_per_turn: int = 1
-    peace_support_recovery_per_turn: int = 2
-    failed_war_support_penalty: int = 14
+    # War support recovers slowly in peacetime so failed aggression has a cost.
+    # Failed aggressors are handled even more strictly during their truce window.
+    peace_support_recovery_per_turn: int = 1
+    failed_aggressor_truce_support_recovery_per_turn: int = 0
+    failed_war_support_penalty: int = 30
     successful_war_support_bonus: int = 6
     peace_relief_support_bonus: int = 3
+    # Indemnity starts with a simple concession, then scales with how clearly
+    # the payer lost. The bank cap keeps peace painful without deleting the
+    # loser economy outright.
+    peace_indemnity_score_multiplier: int = 2
+    peace_indemnity_base_damage_multiplier: int = 2
+    peace_indemnity_income_gap_turns: int = 3
+    peace_indemnity_war_turn_divisor: int = 2
+    peace_indemnity_game_turn_divisor: int = 12
+    peace_indemnity_max_bank_pct: int = 65
+    # Losing peace can add light post-war concessions. Keep these short and
+    # capped so peace changes incentives without becoming a death sentence.
+    concession_score_deficit_threshold: int = 8
+    concession_base_damage_threshold: int = 8
+    concession_reparations_turns: int = 3
+    concession_reparations_income_pct: int = 50
+    concession_min_reparations_per_turn: int = 1
+    concession_war_support_cap: int = 60
+    concession_war_support_cap_turns: int = 10
+    # Peace while clearly winning is usually wasted advantage, not prudence.
+    # These knobs describe a finish window where the AI should press unless it
+    # is exhausted, under counterattack risk, or stuck in a long stalled war.
+    peace_winning_score_margin: int = 1
+    peace_winning_front_radius: int = 6
+    peace_winning_finish_hp: int = 12
+    peace_winning_disfavor: int = 240
+    peace_exhausted_war_support: int = 20
+    peace_stalled_war_turns: int = 18
     war_score_unit_kill: int = 3
     war_score_worker_kill: int = 2
     war_score_base_damage: int = 1
@@ -308,6 +344,26 @@ class AgeGridEnv:
         occupied.update(unit.position for unit in self.units)
         return occupied
 
+    def _unit_positions(self, *, exclude_unit_id: int | None = None) -> set[Position]:
+        return {unit.position for unit in self.units if unit.id != exclude_unit_id}
+
+    def _building_positions(self) -> set[Position]:
+        return {building.position for building in self.buildings if building.hp > 0}
+
+    def _base_positions(self) -> set[Position]:
+        return {base.position for base in self.bases.values() if base.hp > 0}
+
+    def _movement_blocked_positions(self, unit: Unit) -> set[Position]:
+        blocked = self._unit_positions(exclude_unit_id=unit.id)
+        blocked.update(base.position for base in self.bases.values() if base.faction != unit.faction and base.hp > 0)
+        return blocked
+
+    def _construction_blocked_positions(self, faction: str) -> set[Position]:
+        blocked = self._base_positions()
+        blocked.update(self._building_positions())
+        blocked.update(unit.position for unit in self.units if unit.faction != faction)
+        return blocked
+
     def _resource_at(self, pos: Position, faction: str | None = None) -> ResourceNode | None:
         for resource in self.resources:
             if (
@@ -381,6 +437,12 @@ class AgeGridEnv:
         friendly_guard_positions: list[Position],
     ) -> list[Position]:
         targets = [resource.position for resource in visible_resources if resource.position != worker.position]
+        # Workers need tactical one-step options under raids and sieges. Without
+        # adjacent hexes in the legal target set, the heuristic can only send a
+        # worker toward strategic landmarks, which sometimes means walking back
+        # onto the spawn ring or base while trying to survive.
+        if any(enemy.attack_damage > 0 for enemy in enemy_units):
+            targets.extend(pos for pos in hexgrid.neighbors(worker.position) if self._in_bounds(pos))
         targets.extend(enemy_base_positions)
         targets.extend(enemy.position for enemy in enemy_units)
         targets.extend(pos for pos in friendly_guard_positions if pos != worker.position)
@@ -478,7 +540,7 @@ class AgeGridEnv:
             if self.can_declare_war(faction, enemy_faction):
                 action_set.add(("declare_war", enemy_faction))
             if self.can_offer_peace(faction, enemy_faction):
-                indemnity = min(self.config.peace_indemnity_base, self.bank[faction])
+                indemnity = diplomacy.recommended_peace_indemnity(self, faction, enemy_faction)
                 action_set.add(("offer_peace", enemy_faction, indemnity))
             if self.can_accept_peace(faction, enemy_faction):
                 action_set.add(("accept_peace", enemy_faction))
@@ -702,6 +764,8 @@ class AgeGridEnv:
             return False, "bad_args"
         attacker_id = action[1]
         target_faction = action[2]
+        attacker = self.get_unit(attacker_id)
+        attacker_hp_before = attacker.hp if attacker is not None else None
         if not combat.attack_base(self, faction, attacker_id, target_faction):
             return False, "attack_base_failed"
         self.attacked_unit_ids.add(attacker_id)
@@ -710,6 +774,11 @@ class AgeGridEnv:
             event = f"{faction} unit#{attacker_id} destroyed the {target_faction} base"
         else:
             event = f"{faction} unit#{attacker_id} hit the {target_faction} base ({base_hp} hp left)"
+            attacker_after = self.get_unit(attacker_id)
+            if attacker_hp_before is not None and attacker_after is None:
+                event += f"; {target_faction} base shot down unit#{attacker_id}"
+            elif attacker_hp_before is not None and attacker_after is not None and attacker_after.hp < attacker_hp_before:
+                event += f"; {target_faction} base retaliated ({attacker_after.hp} hp left)"
         return self._success("attack_base", event=event)
 
     def _handle_move_towards(self, faction: str, action: Action | tuple) -> tuple[bool, str]:
