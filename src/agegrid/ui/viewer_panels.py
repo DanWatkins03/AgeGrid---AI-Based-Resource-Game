@@ -71,17 +71,26 @@ def selected_unit_lines(text: PanelText, env: AgeGridEnv, unit) -> list[str]:
 
 
 def selected_resource_lines(text: PanelText, resource, env: AgeGridEnv | None = None, faction: str | None = None) -> list[str]:
-    label = text.resource_labels.get(resource.resource_type, resource.resource_type.title())
+    label     = text.resource_labels.get(resource.resource_type, resource.resource_type.title())
     help_text = text.resource_help.get(resource.resource_type, "Strategic resource node.")
-    extra = "Visible once its required tech is unlocked." if resource.required_tech else "Available to gather immediately."
-    access = "Contested by enemy military" if env is not None and faction is not None and env.resource_is_contested(resource, faction) else "Infinite source"
-    return [
-        label,
-        help_text,
-        extra,
-        access,
-        f"Abundance {resource.abundance}",
-    ]
+
+    lines = [label, help_text]
+
+    # Tech requirement to reveal this resource on the map
+    if resource.required_tech:
+        tech_name = resource.required_tech.replace("_", " ").title()
+        lines.append(f"Revealed by: {tech_name} research")
+    else:
+        lines.append("Visible from game start — no tech required")
+
+    # Current access status
+    if env is not None and faction is not None:
+        if env.resource_is_contested(resource, faction):
+            lines.append("Status: Contested — enemy military is nearby")
+        else:
+            lines.append("Status: Free — move a Worker here to gather")
+
+    return lines
 
 
 def selected_building_lines(

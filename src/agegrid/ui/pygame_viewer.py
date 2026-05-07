@@ -40,6 +40,17 @@ from src.agegrid.ui.research_view import (
     tech_tree_layout as _tech_tree_layout,
     tech_label as _tech_label,
 )
+from src.agegrid.ui.diplomacy_ui import (
+    ai_flavor_text as _diplo_flavor,
+    draw_declare_war_modal as _draw_declare_war_modal,
+    draw_faction_diplomacy_banner as _draw_faction_diplomacy_banner,
+    draw_peace_panel as _draw_peace_panel,
+    draw_war_status_bar as _draw_war_status_bar,
+    draw_war_status_hud as _draw_war_status_hud,
+    relation_chip_text as _relation_chip_text,
+    war_outcome_label as _war_outcome_label,
+)
+from src.agegrid.ui.notifications import player_notifications as _player_notifications
 from src.agegrid.ui.viewer_panels import (
     PanelColors,
     PanelDrawHelpers,
@@ -103,6 +114,7 @@ GOLD_DIM = (148, 124, 72)
 HUD_H = 158           # height of the three top-bar panels
 HUD_INNER_PAD = 9     # inner padding inside each HUD panel
 HUD_FACTION_W = 280   # each faction bar width; may be capped to fit board width
+WAR_BAR_H = 56        # bottom war/diplomacy status strip height
 
 # Text tones for drawing on top of parchment/asset panel backgrounds
 PARCH_TITLE = (68, 50, 34)    # main title on parchment
@@ -124,9 +136,11 @@ RESOURCE_CONTESTED = (226, 86, 76)
 HEX_HOVER_FILL = (176, 206, 230)
 HEX_SELECT_FILL = (245, 216, 120)
 HEX_SELECT_LINE = (250, 234, 167)
-HEX_MOVE_FILL = (111, 201, 136)
-HEX_MOVE_LINE = (194, 247, 205)
-HEX_BUILD_FILL = (214, 164, 92)
+HEX_MOVE_FILL   = (111, 201, 136)
+HEX_MOVE_LINE   = (194, 247, 205)
+HEX_ATTACK_FILL = (210, 68,  58)
+HEX_ATTACK_LINE = (252, 148, 132)
+HEX_BUILD_FILL  = (214, 164, 92)
 HEX_BUILD_LINE = (248, 220, 168)
 BOARD_SHADOW = (6, 9, 13)
 BASE_HEX_SIZE = 31
@@ -154,16 +168,16 @@ BUILDING_LABELS = {
 }
 
 BUILDING_HELP = {
-    "storehouse": "Passive income each turn",
-    "barracks": "Trains soldiers and supports infantry tech",
-    "quarry": "Unlocks stone economy scaling",
-    "stable": "Trains horsemen",
-    "archer_tower": "Defensive ranged tower",
-    "ballista_tower": "Late defensive siege tower",
-    "market": "Trade hub that improves economic scaling",
-    "wall": "Cheap blocking fortification that hardens your frontier",
-    "stronghold": "Heavy defensive fortification with stronger fire",
-    "siege_workshop": "Produces late siege units",
+    "storehouse": "Generates +3 gold/turn. Core income building. Boosted by Trade and Currency tech.",
+    "barracks": "Required for Soldier and Archer training. Enables infantry tech path.",
+    "quarry": "Generates +4 gold/turn. Requires adjacent stone node. Enables walls and towers.",
+    "stable": "Required for Horseman and Heavy Cavalry training. Requires adjacent horse node.",
+    "archer_tower": "Defensive tower: ATK 3, range 3. Guards your frontier passively each turn.",
+    "ballista_tower": "Heavy defensive tower: ATK 5, range 4. Best static defence. Requires Engineering.",
+    "market": "Generates +4 gold/turn. Requires Storehouse. Strong late-game income multiplier.",
+    "wall": "Cheap frontier fortification with high HP. Slows and blocks enemy movement.",
+    "stronghold": "Fortified tower: ATK 4, range 3. High HP. The strongest defensive structure.",
+    "siege_workshop": "Required for Ballista production. Enables late-game siege capability.",
 }
 
 UNIT_LABELS = {
@@ -176,12 +190,12 @@ UNIT_LABELS = {
 }
 
 UNIT_HELP = {
-    "worker": "Economic unit that gathers resources and constructs buildings.",
-    "soldier": "Frontline melee fighter used to hold territory and pressure bases.",
-    "archer": "Ranged support unit that softens targets before they can answer back.",
-    "horseman": "Fast cavalry raider that can flank, chase, and punish exposed units.",
-    "heavy_cavalry": "Armored cavalry shock unit that hits harder and lasts longer.",
-    "ballista": "Slow siege engine with long range and heavy anti-structure pressure.",
+    "worker": "Economy unit. Gathers resources and builds structures. Fragile — keep it safe.",
+    "soldier": "Frontline melee. Holds territory and pressures bases. Iron/Steel tech adds HP and ATK.",
+    "archer": "Ranged support (range 3). Softens enemies before contact. Engineering extends range to 4.",
+    "horseman": "Fast cavalry raider (move 3). Flanks, chases, and punishes exposed units.",
+    "heavy_cavalry": "Armored shock cavalry. Higher HP and ATK than horseman. Requires Heavy Cavalry tech.",
+    "ballista": "Slow siege engine (range 4). Heavy base damage. Requires Siege Workshop and Advanced Siege.",
 }
 
 RESOURCE_LABELS = {
@@ -191,9 +205,9 @@ RESOURCE_LABELS = {
 }
 
 RESOURCE_HELP = {
-    "ore": "Basic gatherable resource node that feeds your economy.",
-    "stone": "Strategic node used for quarry, walls, and stronger structures.",
-    "horses": "Strategic node used for cavalry infrastructure and mounted units.",
+    "ore":    "Workers on this tile gather gold each turn. Your main early income source.",
+    "stone":  "Enables: Quarry (+4/turn), Wall, Archer Tower, Stronghold. Build adjacent (Masonry).",
+    "horses": "Enables: Stable, Horseman (move 3), Heavy Cavalry. Build Stable adjacent (Horseback Riding).",
 }
 
 
@@ -234,6 +248,29 @@ def _valid_human_move_targets(env: AgeGridEnv, unit, moved_units: set[int]) -> l
         if movement.can_move_towards(env, unit.id, pos):
             valid_targets.append(pos)
     return valid_targets
+
+
+def _valid_human_attack_targets(env: AgeGridEnv, unit) -> list[tuple[int, int]]:
+    """Positions the selected unit can attack (enemy units + enemy base)."""
+    if unit is None or unit.unit_type == "worker":
+        return []
+    if unit.faction != env.factions[env.current_player]:
+        return []
+    if env.actions_left <= 0 or env.attempts_left <= 0:
+        return []
+    enemy = next((f for f in env.factions if f != unit.faction), None)
+    if enemy is None or not env.at_war(unit.faction, enemy):
+        return []
+
+    targets: list[tuple[int, int]] = []
+    for eu in env.units:
+        if env._can_attack_unit(unit.faction, unit, eu):
+            targets.append(eu.position)
+    if enemy in env.bases:
+        base = env.bases[enemy]
+        if env._can_attack_base(unit.faction, unit, enemy, base):
+            targets.append(base.position)
+    return targets
 
 
 def _can_human_gather(env: AgeGridEnv, unit, moved_units: set[int]) -> bool:
@@ -277,8 +314,9 @@ def _turn_budget_reason(env: AgeGridEnv) -> str | None:
 
 
 def _train_option(env: AgeGridEnv, faction: str, unit_type: str) -> HumanActionOption:
-    label = UNIT_LABELS.get(unit_type, unit_type.title()) if unit_type != "worker" else "Worker"
+    label   = UNIT_LABELS.get(unit_type, unit_type.title()) if unit_type != "worker" else "Worker"
     payload = ("spawn_worker",) if unit_type == "worker" else ("train", unit_type)
+
     budget_reason = _turn_budget_reason(env)
     if budget_reason:
         return HumanActionOption(label=label, payload=payload, enabled=False, reason=budget_reason)
@@ -286,62 +324,95 @@ def _train_option(env: AgeGridEnv, faction: str, unit_type: str) -> HumanActionO
     spec = production.unit_stats(env, faction, unit_type)
     if spec is None:
         return HumanActionOption(label=label, payload=payload, enabled=False, reason="Unavailable.")
-    cost = env.config.worker_spawn_cost if unit_type == "worker" else spec.cost
+
     state = env.faction_state(faction)
-    if state.resources < cost:
-        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Costs {cost}.")
+
+    # Priority 1 — tech (most fundamental; can't shortcut with gold)
     if spec.required_tech and spec.required_tech not in state.techs_unlocked:
-        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Needs {_tech_label(spec.required_tech)}.")
+        return HumanActionOption(label=label, payload=payload, enabled=False,
+                                 reason=f"Research {_tech_label(spec.required_tech)} first.")
+
+    # Priority 2 — required building
     if spec.required_building and not any(
-        building.building_type == spec.required_building for building in env.get_buildings_for_faction(faction)
+        b.building_type == spec.required_building for b in env.get_buildings_for_faction(faction)
     ):
-        return HumanActionOption(label=label, payload=payload, enabled=False, reason=f"Needs {_building_label(spec.required_building)}.")
+        return HumanActionOption(label=label, payload=payload, enabled=False,
+                                 reason=f"Build {_building_label(spec.required_building)} first.")
+
+    # Priority 3 — gold
+    cost = env.config.worker_spawn_cost if unit_type == "worker" else spec.cost
+    if state.resources < cost:
+        return HumanActionOption(label=label, payload=payload, enabled=False,
+                                 reason=f"Need {cost}g (have {state.resources}g).")
+
+    # Priority 4 — unit-specific caps / spawn space
     if unit_type == "worker":
-        workers = [unit for unit in env.get_units_for_faction(faction) if unit.unit_type == "worker"]
+        workers = [u for u in env.get_units_for_faction(faction) if u.unit_type == "worker"]
         if len(workers) >= env.config.max_workers:
-            return HumanActionOption(label=label, payload=payload, enabled=False, reason="Worker cap reached.")
+            return HumanActionOption(label=label, payload=payload, enabled=False,
+                                     reason=f"Worker cap ({env.config.max_workers}) reached.")
+
     occ = env._unit_positions()
     if not any(env._in_bounds(pos) and pos not in occ for pos in hexgrid.neighbors(env.bases[faction].position)):
-        return HumanActionOption(label=label, payload=payload, enabled=False, reason="Spawn tiles are blocked.")
+        return HumanActionOption(label=label, payload=payload, enabled=False,
+                                 reason="No free spawn tiles next to base.")
+
     return HumanActionOption(label=label, payload=payload)
 
 
 def _build_option(env: AgeGridEnv, faction: str, worker, building_type: str, pending_build_type: str | None) -> HumanActionOption:
-    label = _building_label(building_type)
+    label   = _building_label(building_type)
     payload = ("build_mode", building_type)
+    active  = pending_build_type == building_type
+
     budget_reason = _turn_budget_reason(env)
     if budget_reason:
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=budget_reason)
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False, reason=budget_reason)
 
     spec = production.building_stats(env, faction, building_type)
     if spec is None:
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason="Unavailable.")
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False, reason="Unavailable.")
+
     state = env.faction_state(faction)
-    if state.resources < spec.cost:
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Costs {spec.cost}.")
+
+    # Priority 1 — tech (most fundamental)
     if spec.required_tech and spec.required_tech not in state.techs_unlocked:
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Needs {_tech_label(spec.required_tech)}.")
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False,
+                                 reason=f"Research {_tech_label(spec.required_tech)} first.")
+
+    # Priority 2 — required building
     if spec.required_building and not any(
-        building.building_type == spec.required_building for building in env.get_buildings_for_faction(faction)
+        b.building_type == spec.required_building for b in env.get_buildings_for_faction(faction)
     ):
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason=f"Needs {_building_label(spec.required_building)}.")
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False,
+                                 reason=f"Build {_building_label(spec.required_building)} first.")
+
+    # Priority 3 — adjacent resource (positional — worker may need to move)
     if spec.required_resource_adjacent:
         has_resource_target = any(
-            production.can_build(env, faction, worker.id, building_type, pos) for pos in hexgrid.neighbors(worker.position)
+            production.can_build(env, faction, worker.id, building_type, pos)
+            for pos in hexgrid.neighbors(worker.position)
         )
         if not has_resource_target:
-            resource_label = RESOURCE_LABELS.get(spec.required_resource_adjacent, spec.required_resource_adjacent.title())
+            r_label = RESOURCE_LABELS.get(spec.required_resource_adjacent,
+                                          spec.required_resource_adjacent.title())
             return HumanActionOption(
-                label=label,
-                payload=payload,
-                active=pending_build_type == building_type,
-                enabled=False,
-                reason=f"Needs adjacent {resource_label}.",
+                label=label, payload=payload, active=active, enabled=False,
+                reason=f"Move worker adjacent to a {r_label}.",
             )
+
+    # Priority 4 — gold
+    if state.resources < spec.cost:
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False,
+                                 reason=f"Need {spec.cost}g (have {state.resources}g).")
+
+    # Priority 5 — valid tile to place on
     targets = _human_build_targets(env, worker, building_type)
     if not targets:
-        return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type, enabled=False, reason="No adjacent build tile.")
-    return HumanActionOption(label=label, payload=payload, active=pending_build_type == building_type)
+        return HumanActionOption(label=label, payload=payload, active=active, enabled=False,
+                                 reason="No valid adjacent tile to build on.")
+
+    return HumanActionOption(label=label, payload=payload, active=active)
 
 
 def _disabled_option_hint(options: list[HumanActionOption]) -> str | None:
@@ -350,6 +421,73 @@ def _disabled_option_hint(options: list[HumanActionOption]) -> str | None:
         return None
     preview = disabled[:3]
     return "Unavailable: " + "  ".join(preview)
+
+
+def _human_diplomacy_options(env: AgeGridEnv, faction: str) -> list[HumanActionOption]:
+    """Build diplomatic action buttons for the current human turn."""
+    enemy = next((f for f in env.factions if f != faction), None)
+    if enemy is None:
+        return []
+
+    options: list[HumanActionOption] = []
+
+    # Accept peace (highest priority — enemy offered terms)
+    if env.can_accept_peace(faction, enemy):
+        options.append(HumanActionOption(
+            label="Accept Peace",
+            payload=("open_diplomacy", "accept_peace", enemy),
+            enabled=True,
+        ))
+
+    # Offer peace
+    if env.can_offer_peace(faction, enemy):
+        options.append(HumanActionOption(
+            label="Offer Peace",
+            payload=("open_diplomacy", "offer_peace", enemy),
+            enabled=True,
+        ))
+    elif env.at_war(faction, enemy):
+        relation = env.relation_state(faction, enemy)
+        turns_so_far = max(0, env.turn - relation.since_turn)
+        turns_left   = max(0, env.config.peace_offer_min_turns - turns_so_far)
+        if turns_left > 0:
+            reason = f"Wait {turns_left} more turn{'s' if turns_left != 1 else ''}."
+        else:
+            reason = "Peace offer already pending."
+        options.append(HumanActionOption(
+            label="Offer Peace",
+            payload=("open_diplomacy", "offer_peace", enemy),
+            enabled=False,
+            reason=reason,
+        ))
+
+    # Declare war
+    if env.can_declare_war(faction, enemy):
+        options.append(HumanActionOption(
+            label="Declare War",
+            payload=("open_diplomacy", "declare_war", enemy),
+            enabled=True,
+        ))
+    elif not env.at_war(faction, enemy):
+        relation = env.relation_state(faction, enemy)
+        f_state  = env.faction_state(faction)
+        if relation.state == "truce":
+            tl = max(0, relation.truce_until_turn - env.turn)
+            reason = f"Truce: {tl} turn{'s' if tl != 1 else ''} remain."
+        elif f_state.war_support < env.config.war_support_to_declare_min:
+            reason = f"War support too low ({f_state.war_support})."
+        elif env.bank[faction] < env.config.war_declaration_cost:
+            reason = f"Need {env.config.war_declaration_cost} gold to declare."
+        else:
+            reason = "Cannot declare war now."
+        options.append(HumanActionOption(
+            label="Declare War",
+            payload=("open_diplomacy", "declare_war", enemy),
+            enabled=False,
+            reason=reason,
+        ))
+
+    return options
 
 
 def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected_tile, pending_build_type: str | None) -> tuple[str | None, list[HumanActionOption], str | None]:
@@ -381,7 +519,13 @@ def _human_action_options(env: AgeGridEnv, faction: str, selected_unit, selected
                 hint = f"{hint}  {disabled_hint}" if hint else disabled_hint
             return "Worker Actions", options, hint
 
-        return "Unit Actions", options, "Select a worker or base to access build and recruit commands."
+        enemy = next((f for f in env.factions if f != faction), None)
+        at_war = enemy is not None and env.at_war(faction, enemy)
+        if at_war:
+            unit_hint = "Click a red-highlighted enemy unit or base to attack. Green tiles to move."
+        else:
+            unit_hint = "Move to highlighted green tiles. Select your base to train units."
+        return "Unit Actions", options, unit_hint
 
     if selected_tile is not None:
         selected_base = next(((base_faction, base) for base_faction, base in env.bases.items() if base.position == selected_tile), None)
@@ -562,11 +706,11 @@ def _draw_panel(
 
 def _relation_color(relation: str) -> tuple[int, int, int]:
     lowered = relation.lower()
-    if lowered == "peace":
+    if lowered.startswith("peace"):
         return PARCH_GOOD
-    if lowered == "war":
+    if lowered.startswith("war"):
         return PARCH_DANGER
-    if lowered == "truce":
+    if lowered.startswith("truce"):
         return PARCH_WARN
     return PARCH_MUTED
 
@@ -602,6 +746,75 @@ def _era_color(era: str) -> tuple[int, int, int]:
     return (180, 160, 130)             # founding tan
 
 
+def _faction_war_upkeep(env: AgeGridEnv, faction: str) -> int:
+    """Gold per turn drained as war upkeep; 0 when not at war."""
+    enemy = next((f for f in env.factions if f != faction), None)
+    if enemy is None or not env.at_war(faction, enemy):
+        return 0
+    upkeep = env.config.war_upkeep_per_turn
+    if env.relation_state(faction, enemy).aggressor == faction:
+        upkeep += env.config.war_upkeep_aggressor_bonus
+    return upkeep
+
+
+def _faction_war_status_row(env: AgeGridEnv, faction: str) -> str | None:
+    """Short status string for the faction bar — replaces research label during war/truce.
+
+    Returns None during peace so the caller can fall back to the research label.
+    """
+    enemy = next((f for f in env.factions if f != faction), None)
+    if enemy is None:
+        return None
+
+    relation = env.relation_state(faction, enemy)
+    f_state  = env.faction_state(faction)
+    cfg      = env.config
+
+    if relation.state == "war":
+        support = f_state.war_support
+        upkeep  = cfg.war_upkeep_per_turn
+        if relation.aggressor == faction:
+            upkeep += cfg.war_upkeep_aggressor_bonus
+
+        cap_str = ""
+        if f_state.war_support_cap < 100 and f_state.war_support_cap_until_turn > env.turn:
+            cap_left = f_state.war_support_cap_until_turn - env.turn
+            cap_str = f" [cap:{f_state.war_support_cap}/{cap_left}t]"
+
+        return f"Support: {support}%{cap_str}  Upkeep: -{upkeep}/t"
+
+    if relation.state == "truce":
+        support    = f_state.war_support
+        truce_left = max(0, relation.truce_until_turn - env.turn)
+        recovery   = cfg.peace_support_recovery_per_turn
+        if relation.failed_aggressor == faction:
+            recovery = cfg.failed_aggressor_truce_support_recovery_per_turn
+        recov_str = f"+{recovery}/t" if recovery > 0 else "blocked"
+
+        # Concession reparations still active?
+        conc = relation.concessions
+        if conc and conc.payer == faction and env.turn < conc.reparations_until_turn:
+            rep_left = max(0, conc.reparations_until_turn - env.turn)
+            return (
+                f"Truce: {truce_left}t  Reps: -{conc.reparations_per_turn}/t ({rep_left}t)"
+            )
+
+        return f"Truce: {truce_left}t  Support: {support}% ({recov_str})"
+
+    return None  # at peace — caller uses research label
+
+
+def _faction_near_collapse(env: AgeGridEnv, faction: str) -> bool:
+    """True when the faction has no military and cannot afford a worker.
+
+    Signals that automatic collapse could occur within one turn.
+    """
+    if not env.config.collapse_enabled:
+        return False
+    has_mil = any(u for u in env.units if u.faction == faction and u.unit_type != "worker")
+    return not has_mil and env.bank[faction] < env.config.worker_spawn_cost + 15
+
+
 def _draw_faction_bar(
     surface: pygame.Surface,
     body_font: pygame.font.Font,
@@ -619,15 +832,24 @@ def _draw_faction_bar(
     relation: str,
     research_label: str,
     accent: tuple[int, int, int],
+    *,
+    war_info: str | None = None,
+    collapse_warning: bool = False,
 ) -> None:
-    """Slim faction summary bar for the top HUD (Red left, Blue right)."""
+    """Slim faction summary bar for the top HUD (Red left, Blue right).
+
+    war_info   — when provided, replaces the research row with a war/truce
+                 status line (support %, upkeep, reparations, truce countdown).
+    collapse_warning — when True, replaces the army row with a collapse alert.
+    """
     panel_key = "panel_blue" if faction == "Blue" else "panel_brown"
     if not _draw_scaled_sprite(surface, board_assets.ui_sprite(panel_key), rect):
         _draw_panel(surface, rect, fill=PANEL_BG, border=accent, radius=12)
 
-    # Thin faction-accent bar at the top edge of the panel
+    # Thin faction-accent bar at the top edge of the panel (red pulsing if collapsing)
+    bar_color = (196, 52, 46) if collapse_warning else accent
     accent_bar = pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, 4)
-    pygame.draw.rect(surface, accent, accent_bar, border_radius=6)
+    pygame.draw.rect(surface, bar_color, accent_bar, border_radius=6)
 
     ix = rect.x + HUD_INNER_PAD
     iw = rect.width - HUD_INNER_PAD * 2
@@ -659,12 +881,22 @@ def _draw_faction_bar(
         _draw_shadow_text(surface, small_font, label, tx, chip_rect.y + 6, text_color, shadow=PARCH_SHADOW, shadow_offset=1)
     y += chip_h + 6
 
-    # Row 3: research + army summary
-    research_text = _fit_text(f"Research {research_label}", small_font, iw)
-    _draw_shadow_text(surface, small_font, research_text, ix, y, PARCH_INFO, shadow=PARCH_SHADOW, shadow_offset=1)
+    # Row 3: war/truce status (when active) OR research label
+    if war_info is not None:
+        row3_text  = _fit_text(war_info, small_font, iw)
+        row3_color = PARCH_WARN
+        _draw_shadow_text(surface, small_font, row3_text, ix, y, row3_color, shadow=PARCH_SHADOW, shadow_offset=1)
+    else:
+        research_text = _fit_text(f"Research {research_label}", small_font, iw)
+        _draw_shadow_text(surface, small_font, research_text, ix, y, PARCH_INFO, shadow=PARCH_SHADOW, shadow_offset=1)
     y += small_font.get_height() + 3
-    army_text = _fit_text(f"Army {army_summary}", small_font, iw)
-    _draw_shadow_text(surface, small_font, army_text, ix, y, (90, 138, 68), shadow=PARCH_SHADOW, shadow_offset=1)
+
+    # Row 3b: army summary OR collapse warning
+    if collapse_warning:
+        _draw_shadow_text(surface, small_font, "NEAR COLLAPSE", ix, y, PARCH_DANGER, shadow=PARCH_SHADOW, shadow_offset=1)
+    else:
+        army_text = _fit_text(f"Army {army_summary}", small_font, iw)
+        _draw_shadow_text(surface, small_font, army_text, ix, y, (90, 138, 68), shadow=PARCH_SHADOW, shadow_offset=1)
     y += small_font.get_height() + 6
 
     # Row 4: base HP bar
@@ -694,6 +926,59 @@ def _faction_army_summary(env: AgeGridEnv, faction: str) -> str:
     return f"{total}  S{composition['soldier']} A{composition['archer']} H{composition['horseman']}"
 
 
+def _strategic_advisor_hint(
+    env: AgeGridEnv, faction: str,
+) -> tuple[str, tuple[int, int, int]] | None:
+    """Return (hint, colour) for the single most useful strategic tip, or None.
+
+    Priority order: war urgency → economy → military → research idle.
+    Only fires when the tip is actionable — no noise when things are going well.
+    """
+    f_state   = env.faction_state(faction)
+    techs     = f_state.techs_unlocked
+    bld_types = {b.building_type for b in env.get_buildings_for_faction(faction)}
+
+    # ── War urgency ────────────────────────────────────────────────────────
+    enemy = next((f for f in env.factions if f != faction), None)
+    if enemy and env.at_war(faction, enemy):
+        if f_state.war_support <= 20:
+            return ("War support critical — consider offering peace.", PARCH_DANGER)
+        if f_state.war_support <= 35:
+            return ("War support falling. Your people grow weary of the conflict.", PARCH_WARN)
+
+    # ── Economy foundation ─────────────────────────────────────────────────
+    if "storehouse" not in bld_types:
+        if "mining" not in techs:
+            return ("Research Mining to unlock the Storehouse (+3 gold/turn).", PARCH_INFO)
+        return ("Build a Storehouse near your base for +3 gold/turn income.", PARCH_INFO)
+
+    # ── Military minimum ───────────────────────────────────────────────────
+    mil_units = [u for u in env.units if u.faction == faction and u.unit_type != "worker"]
+    if not mil_units:
+        if "barracks" in bld_types:
+            return ("No military — train Soldiers from your base.", PARCH_WARN)
+        if "bronze" in techs:
+            return ("Build a Barracks to start training Soldiers.", PARCH_WARN)
+        if tech.can_research(env, faction, "bronze"):
+            return ("Research Bronze to unlock Soldiers and the Barracks.", PARCH_INFO)
+
+    # ── Cavalry path hint ──────────────────────────────────────────────────
+    has_horses = any(r.resource_type == "horses" for r in env.resources)
+    if has_horses:
+        if "horseback_riding" in techs and "stable" not in bld_types:
+            return ("Horse tiles present — build a Stable adjacent to one for cavalry.", PARCH_INFO)
+        elif "animal_husbandry" not in techs and tech.can_research(env, faction, "animal_husbandry"):
+            return ("Research Animal Husbandry to start the cavalry path.", PARCH_INFO)
+
+    # ── Idle research ──────────────────────────────────────────────────────
+    if f_state.tech_in_progress is None:
+        available = _available_research_ids(env, faction)
+        if available:
+            return (f"No active research — start {_tech_label(available[0])}?", PARCH_INFO)
+
+    return None
+
+
 def _draw_center_hud_idle(
     surface: pygame.Surface,
     small_font: pygame.font.Font,
@@ -716,6 +1001,15 @@ def _draw_center_hud_idle(
     y += small_font.get_height() + 3
     year_text = _fit_text(f"Year {env.formatted_year()}   {env.current_era()}", small_font, width)
     _draw_shadow_text(surface, small_font, year_text, ix, y, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=1)
+    y += small_font.get_height() + 4
+
+    # Contextual advisor tip — only shown when actionable (not every frame)
+    if human_turn_active:
+        hint = _strategic_advisor_hint(env, current_faction)
+        if hint:
+            hint_text, hint_color = hint
+            _draw_shadow_text(surface, small_font, _fit_text(hint_text, small_font, width),
+                              ix, y, hint_color, shadow=PARCH_SHADOW, shadow_offset=1)
 
 
 def _draw_center_hud(
@@ -898,6 +1192,8 @@ def _draw_event_panel(
     lines: list[str],
     rect: pygame.Rect,
     scroll_offset: int = 0,
+    *,
+    notifications: list[tuple[str, tuple[int, int, int]]] | None = None,
 ) -> None:
     inner = _draw_parchment_panel_frame(surface, board_assets, rect)
     total_rows = len(lines if lines else ["No events yet"])
@@ -905,6 +1201,19 @@ def _draw_event_panel(
     y = _draw_parchment_header(surface, title_font, body_font, inner, "Events", note=note)
     max_width = inner.width - 18
     line_height = 19
+
+    # Notifications pinned at the top (state-derived, not scrollable)
+    if notifications:
+        for notif_text, notif_color in notifications:
+            for w_line in _wrap_lines(notif_text, body_font, max_width):
+                if y + line_height > inner.bottom - 8:
+                    break
+                _draw_shadow_text(surface, body_font, w_line, inner.x + 8, y, notif_color,
+                                  shadow=PARCH_SHADOW, shadow_offset=1)
+                y += line_height
+        pygame.draw.line(surface, PARCH_LINE, (inner.x + 8, y + 2), (inner.right - 8, y + 2), 1)
+        y += 8
+
     event_lines = lines if lines else ["No events yet"]
     wrapped_entries: list[tuple[list[str], tuple[int, int, int]]] = []
     for entry in event_lines:
@@ -1583,15 +1892,18 @@ def _hover_tile_lines(env: AgeGridEnv, pos: tuple[int, int]) -> list[str]:
         return [f"{faction} Base", f"HP {base.hp}"]
     resource = next((r for r in env.resources if r.position == pos and r.abundance > 0), None)
     if resource is not None:
-        label = "Horse Herd" if resource.resource_type == "horses" else "Stone Deposit" if resource.resource_type == "stone" else "Ore Vein"
-        detail = "Unlocks horseback riding and cavalry" if resource.resource_type == "horses" else "Unlocks quarry, walls, and stronger structures" if resource.resource_type == "stone" else "Gatherable resource"
+        label  = RESOURCE_LABELS.get(resource.resource_type, resource.resource_type.title())
+        detail = RESOURCE_HELP.get(resource.resource_type, "Strategic resource node.")
         contest_labels = _resource_contest_labels(env, resource)
-        access = (
-            f"Contested for {', '.join(contest_labels)}"
-            if contest_labels
-            else "Infinite source"
-        )
-        return [label, detail, access]
+        if contest_labels:
+            access = f"Contested — {', '.join(contest_labels)} fighting for control"
+        else:
+            access = "Free to gather — move a Worker here"
+        lines = [label, detail, access]
+        if resource.required_tech:
+            tech_name = resource.required_tech.replace("_", " ").title()
+            lines.append(f"Requires {tech_name} research to reveal on map")
+        return lines
     return []
 
 
@@ -1892,8 +2204,11 @@ def run_viewer() -> None:
     center_zone_w = board_viewport_width - 2 * faction_bar_w - 16
     top_bar = HUD_H + pad + 10   # total vertical space reserved for the top HUD strip
 
-    width_px = pad * 3 + board_viewport_width + side_panel + 36
-    height_px = pad * 2 + top_bar + board_viewport_height + BASE_HEX_SIZE + 44
+    # Board area is sized by the "base" height, independent of the war bar.
+    # WAR_BAR_H extra pixels are added to height_px so the bar has room below.
+    _base_height = pad * 2 + top_bar + board_viewport_height + BASE_HEX_SIZE + 44
+    width_px  = pad * 3 + board_viewport_width + side_panel + 36
+    height_px = _base_height + WAR_BAR_H + 8
 
     screen = pygame.display.set_mode((width_px, height_px))
     clock = pygame.time.Clock()
@@ -1905,14 +2220,22 @@ def run_viewer() -> None:
     tiny = pygame.font.SysFont("segoeui", 17)
 
     board_x = pad
-    board_content_top = pad + top_bar + 4
-    board_content_bottom = height_px - pad - 18
+    board_content_top    = pad + top_bar + 4
+    board_content_bottom = _base_height - pad - 18   # board area unchanged vs old layout
     board_rect = pygame.Rect(
         board_x,
         board_content_top,
         board_viewport_width,
         max(board_viewport_height, board_content_bottom - board_content_top),
     )
+
+    # Faction bar rects — computed once (they never change after setup).
+    red_bar_rect  = pygame.Rect(board_x, pad, faction_bar_w, HUD_H)
+    blue_bar_rect = pygame.Rect(board_x + board_viewport_width - faction_bar_w, pad, faction_bar_w, HUD_H)
+
+    # War-status bar — placed below the board in the extra space.
+    war_bar_rect = pygame.Rect(board_x, board_content_bottom + 6, board_viewport_width, WAR_BAR_H)
+
     # btn_rect and next_faction_btn_rect are updated each frame from _draw_center_hud
     btn_rect = pygame.Rect(0, 0, 0, 0)
     next_faction_btn_rect = pygame.Rect(0, 0, 0, 0)
@@ -1950,6 +2273,15 @@ def run_viewer() -> None:
     selected_tile: tuple[int, int] | None = None
     selected_unit_id: int | None = None
     pending_build_type: str | None = None
+    # Diplomacy modal state — "declare_war" | "offer_peace" | "accept_peace" | None
+    diplomacy_modal: str | None = None
+    diplomacy_modal_target: str | None = None
+    diplomacy_confirm_rect = pygame.Rect(0, 0, 0, 0)
+    diplomacy_cancel_rect  = pygame.Rect(0, 0, 0, 0)
+    # Faction banner state — which enemy faction's diplomacy banner is open
+    selected_faction: str | None = None
+    faction_banner_btn_rects: list[tuple[pygame.Rect, str, bool]] = []
+    faction_banner_close_rect = pygame.Rect(0, 0, 0, 0)
     camera_state = CameraState()
     _reset_camera_state(camera_state, DEFAULT_VIEWER_ZOOM)
     board_backdrop = board_rect.inflate(22, 28)
@@ -2004,6 +2336,9 @@ def run_viewer() -> None:
                         selected_tile = None
                         selected_unit_id = None
                         pending_build_type = None
+                        diplomacy_modal = None
+                        diplomacy_modal_target = None
+                        selected_faction = None
                         _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
                             env.start_faction_turn()
@@ -2031,6 +2366,9 @@ def run_viewer() -> None:
                         selected_tile = None
                         selected_unit_id = None
                         pending_build_type = None
+                        diplomacy_modal = None
+                        diplomacy_modal_target = None
+                        selected_faction = None
                         _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                         if _is_human_agent_key(_current_agent_key(env, red_index, blue_index)):
                             env.start_faction_turn()
@@ -2053,6 +2391,76 @@ def run_viewer() -> None:
             if event.type == pygame.QUIT:
                 running = False
 
+            # ── Diplomacy modal intercepts all UI inputs while open ────────────
+            if diplomacy_modal is not None:
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    diplomacy_modal = None
+                    diplomacy_modal_target = None
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if diplomacy_confirm_rect.collidepoint(event.pos):
+                        # Execute the confirmed diplomatic action
+                        _target = diplomacy_modal_target
+                        if _target is not None:
+                            if diplomacy_modal == "declare_war" and env.can_declare_war(current_faction, _target):
+                                _action = ("declare_war", _target)
+                                ok, reason = env.apply_action(_action)
+                                if ok:
+                                    human_turn_actions.append(_action)
+                                    human_turn_log.append(reason)
+                                    effects.extend(_effects_from_actions(env, [_action], current_faction))
+                            elif diplomacy_modal == "offer_peace" and env.can_offer_peace(current_faction, _target):
+                                from src.agegrid.env.systems.diplomacy import recommended_peace_indemnity as _rpi
+                                _indemnity = _rpi(env, current_faction, _target)
+                                _action = ("offer_peace", _target, _indemnity)
+                                ok, reason = env.apply_action(_action)
+                                if ok:
+                                    human_turn_actions.append(_action)
+                                    human_turn_log.append(reason)
+                                    effects.extend(_effects_from_actions(env, [_action], current_faction))
+                            elif diplomacy_modal == "accept_peace" and env.can_accept_peace(current_faction, _target):
+                                _action = ("accept_peace", _target)
+                                ok, reason = env.apply_action(_action)
+                                if ok:
+                                    human_turn_actions.append(_action)
+                                    human_turn_log.append(reason)
+                                    effects.extend(_effects_from_actions(env, [_action], current_faction))
+                        diplomacy_modal = None
+                        diplomacy_modal_target = None
+                    elif diplomacy_cancel_rect.collidepoint(event.pos):
+                        diplomacy_modal = None
+                        diplomacy_modal_target = None
+                continue  # block all other UI input while modal is open
+
+            # ── Faction banner: ESC or click-outside to close ─────────────────
+            if selected_faction is not None:
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    selected_faction = None
+                    continue
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Compute banner rect on the fly (both bar rects are layout constants)
+                    if selected_faction == "Blue":
+                        _banner_r = pygame.Rect(
+                            blue_bar_rect.right - 300, blue_bar_rect.bottom + 4, 300, 244,
+                        )
+                    else:
+                        _banner_r = pygame.Rect(
+                            red_bar_rect.left, red_bar_rect.bottom + 4, 300, 244,
+                        )
+                    if faction_banner_close_rect.collidepoint(event.pos):
+                        selected_faction = None
+                        continue
+                    for _br, _key, _enabled in faction_banner_btn_rects:
+                        if _br.collidepoint(event.pos):
+                            if _enabled:
+                                diplomacy_modal        = _key
+                                diplomacy_modal_target = selected_faction
+                                selected_faction       = None
+                            continue
+                    if not _banner_r.collidepoint(event.pos):
+                        # Click outside the banner → close it
+                        selected_faction = None
+                    continue  # consume this click (don't also process as board click)
+
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
@@ -2068,6 +2476,9 @@ def run_viewer() -> None:
                     selected_tile = None
                     selected_unit_id = None
                     pending_build_type = None
+                    diplomacy_modal = None
+                    diplomacy_modal_target = None
+                    selected_faction = None
                     _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
                 elif event.key == pygame.K_t:
                     show_tech_tree = not show_tech_tree
@@ -2288,6 +2699,9 @@ def run_viewer() -> None:
                             break
                         if isinstance(payload, tuple) and payload and payload[0] == "build_mode":
                             pending_build_type = None if pending_build_type == payload[1] else payload[1]
+                        elif isinstance(payload, tuple) and payload and payload[0] == "open_diplomacy":
+                            diplomacy_modal = payload[1]        # "declare_war" | "offer_peace" | "accept_peace"
+                            diplomacy_modal_target = payload[2]  # enemy faction name
                         else:
                             ok, reason = env.apply_action(payload)
                             if ok:
@@ -2309,6 +2723,22 @@ def run_viewer() -> None:
                         tech_tree_pan_x = 0
                 elif camera_btn_rect.collidepoint(event.pos):
                     _reset_camera_state(camera_state, _set_hex_zoom(DEFAULT_VIEWER_ZOOM))
+                elif (
+                    human_turn_active
+                    and env.winner() is None
+                    and blue_bar_rect.collidepoint(event.pos)
+                    and current_faction == "Red"
+                ):
+                    # Red player clicks Blue's bar → open faction diplomacy banner
+                    selected_faction = "Blue" if selected_faction != "Blue" else None
+                elif (
+                    human_turn_active
+                    and env.winner() is None
+                    and red_bar_rect.collidepoint(event.pos)
+                    and current_faction == "Blue"
+                ):
+                    # Blue player clicks Red's bar → open faction diplomacy banner
+                    selected_faction = "Red" if selected_faction != "Red" else None
                 elif board_rect.inflate(18, 18).collidepoint(event.pos):
                     clicked_tile = hexgrid.nearest_hex(
                         event.pos,
@@ -2353,6 +2783,33 @@ def run_viewer() -> None:
                                 effects.extend(_effects_from_actions(env, [action], current_faction))
                                 selected_tile = selected_unit.position
                                 pending_build_type = None
+                        elif (
+                            human_turn_active
+                            and selected_unit is not None
+                            and clicked_tile in valid_attack_targets
+                        ):
+                            # Attack enemy unit or enemy base on the clicked tile
+                            target_unit = next(
+                                (u for u in env.units if u.position == clicked_tile and u.faction != current_faction),
+                                None,
+                            )
+                            target_base_faction = next(
+                                (f for f, b in env.bases.items() if b.position == clicked_tile and f != current_faction),
+                                None,
+                            )
+                            if target_unit is not None:
+                                action = ("attack", selected_unit.id, target_unit.id)
+                            elif target_base_faction is not None:
+                                action = ("attack_base", selected_unit.id, target_base_faction)
+                            else:
+                                action = None
+                            if action is not None:
+                                ok, reason = env.apply_action(action)
+                                if ok:
+                                    human_turn_actions.append(action)
+                                    human_turn_log.append(reason)
+                                    effects.extend(_effects_from_actions(env, [action], current_faction))
+                            selected_tile = clicked_tile
                         elif clicked_tile in valid_targets and selected_unit is not None:
                             action = ("move_towards", selected_unit.id, clicked_tile)
                             ok, reason = env.apply_action(action)
@@ -2402,24 +2859,48 @@ def run_viewer() -> None:
         turn_button_label = "End Turn" if human_turn_active and winner is None else "Next Turn"
 
         # ── Three-zone top HUD ────────────────────────────────────────────────
-        red_bar_rect  = pygame.Rect(board_x, pad, faction_bar_w, HUD_H)
-        blue_bar_rect = pygame.Rect(board_x + board_viewport_width - faction_bar_w, pad, faction_bar_w, HUD_H)
-        center_rect   = pygame.Rect(center_zone_x, pad, center_zone_w, HUD_H)
+        # red_bar_rect and blue_bar_rect are pre-computed constants (see top of run_viewer)
+        center_rect = pygame.Rect(center_zone_x, pad, center_zone_w, HUD_H)
 
-        red_relation = env.relation_state("Red", "Blue").state.title()
-        blue_relation = env.relation_state("Blue", "Red").state.title()
+        red_relation  = _relation_chip_text(env, "Red",  "Blue")
+        blue_relation = _relation_chip_text(env, "Blue", "Red")
 
         _draw_faction_bar(screen, small, tiny, board_assets, red_bar_rect,
             "Red", AGENT_SPECS[red_index].label,
             env.bank["Red"], _faction_income(env, "Red"), _faction_army_summary(env, "Red"),
             env.bases["Red"].hp, env.base_max_hp("Red"),
-            env.current_era(), red_relation, _faction_research_label(env, "Red"), RED_PRIMARY)
+            env.current_era(), red_relation, _faction_research_label(env, "Red"), RED_PRIMARY,
+            war_info=_faction_war_status_row(env, "Red"),
+            collapse_warning=_faction_near_collapse(env, "Red"))
 
         _draw_faction_bar(screen, small, tiny, board_assets, blue_bar_rect,
             "Blue", AGENT_SPECS[blue_index].label,
             env.bank["Blue"], _faction_income(env, "Blue"), _faction_army_summary(env, "Blue"),
             env.bases["Blue"].hp, env.base_max_hp("Blue"),
-            env.current_era(), blue_relation, _faction_research_label(env, "Blue"), BLUE_PRIMARY)
+            env.current_era(), blue_relation, _faction_research_label(env, "Blue"), BLUE_PRIMARY,
+            war_info=_faction_war_status_row(env, "Blue"),
+            collapse_warning=_faction_near_collapse(env, "Blue"))
+
+        # Highlight the enemy faction bar when it is clickable (human turn, no modal)
+        if human_turn_active and winner is None and diplomacy_modal is None:
+            _enemy_bar = blue_bar_rect if current_faction == "Red" else red_bar_rect
+            _ebar_hl   = pygame.Surface(_enemy_bar.size, pygame.SRCALPHA)
+            _hl_alpha  = 38 if selected_faction is None else 64
+            pygame.draw.rect(_ebar_hl, (255, 255, 255, _hl_alpha), _ebar_hl.get_rect(), border_radius=12)
+            pygame.draw.rect(_ebar_hl, (200, 200, 200, 100), _ebar_hl.get_rect(), width=2, border_radius=12)
+            screen.blit(_ebar_hl, _enemy_bar.topleft)
+            # Pending peace offer badge on enemy bar
+            _enemy_faction = "Blue" if current_faction == "Red" else "Red"
+            _erel = env.relation_state(current_faction, _enemy_faction)
+            if _erel.pending_peace_by == _enemy_faction:
+                _draw_badge(screen, tiny,
+                            (_enemy_bar.right - 12, _enemy_bar.y + 12),
+                            "!", fill=(58, 140, 64), border=(160, 240, 168))
+            # Show banner-open indicator
+            if selected_faction is not None:
+                _draw_badge(screen, tiny,
+                            (_enemy_bar.centerx, _enemy_bar.bottom - 8),
+                            "▲", fill=(50, 68, 92), border=(120, 160, 210))
 
         # Resolve selection early so the center HUD can show context-sensitive info
         selected_unit = next((u for u in env.units if u.id == selected_unit_id), None)
@@ -2463,7 +2944,9 @@ def run_viewer() -> None:
         event_panel_h = max(_min_event_h, sidebar_rect.bottom - 8 - (tactical_panel.bottom + 12))
         event_panel = pygame.Rect(sidebar_x + 12, tactical_panel.bottom + 12, side_panel - 24, event_panel_h)
         event_panel_rect = event_panel
-        _draw_event_panel(screen, font, tiny, board_assets, env.recent_events[-14:], event_panel, event_scroll)
+        _active_notifications = _player_notifications(env, current_faction)
+        _draw_event_panel(screen, font, tiny, board_assets, env.recent_events[-14:], event_panel, event_scroll,
+                          notifications=_active_notifications if _active_notifications else None)
 
         hover_pos = None
         if board_rect.inflate(24, 24).collidepoint(mouse_pos):
@@ -2494,13 +2977,16 @@ def run_viewer() -> None:
         camera_btn_rect = pygame.Rect(board_backdrop.right - 86, board_backdrop.y + 11, 74, 30)
         _draw_small_button(screen, tiny, camera_btn_rect, "Reset")
 
-        valid_move_targets: set[tuple[int, int]] = set()
-        valid_build_targets: set[tuple[int, int]] = set()
+        valid_move_targets: set[tuple[int, int]]   = set()
+        valid_build_targets: set[tuple[int, int]]  = set()
+        valid_attack_targets: set[tuple[int, int]] = set()
         if human_turn_active and selected_unit is not None:
-            valid_move_targets = set(_valid_human_move_targets(env, selected_unit, human_moved_units))
+            valid_attack_targets = set(_valid_human_attack_targets(env, selected_unit))
+            valid_move_targets   = set(_valid_human_move_targets(env, selected_unit, human_moved_units))
             if pending_build_type is not None and selected_unit.unit_type == "worker":
-                valid_build_targets = set(_human_build_targets(env, selected_unit, pending_build_type))
-                valid_move_targets = set()
+                valid_build_targets  = set(_human_build_targets(env, selected_unit, pending_build_type))
+                valid_move_targets   = set()
+                valid_attack_targets = set()
 
         previous_clip = screen.get_clip()
         screen.set_clip(inset)
@@ -2528,6 +3014,16 @@ def run_viewer() -> None:
                     )
                     screen.blit(highlight, bounds.topleft)
                     pygame.draw.polygon(screen, HEX_BUILD_LINE, points, width=3)
+                elif pos in valid_attack_targets:
+                    # Red overlay — clickable attack target
+                    highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
+                    pygame.draw.polygon(
+                        highlight,
+                        (*HEX_ATTACK_FILL, 72),
+                        [(x - bounds.x, y - bounds.y) for x, y in points],
+                    )
+                    screen.blit(highlight, bounds.topleft)
+                    pygame.draw.polygon(screen, HEX_ATTACK_LINE, points, width=3)
                 elif pos in valid_move_targets:
                     highlight = pygame.Surface((bounds.width, bounds.height), pygame.SRCALPHA)
                     pygame.draw.polygon(
@@ -2839,6 +3335,14 @@ def run_viewer() -> None:
         else:
             pending_build_type = None
 
+        # ── Bottom war/diplomacy status bar ──────────────────────────────────
+        _enemy = next((f for f in env.factions if f != current_faction), None)
+        if _enemy:
+            _draw_war_status_bar(
+                _PANEL_DRAW_HELPERS, _PANEL_COLORS, screen,
+                small, tiny, board_assets, env, current_faction, _enemy, war_bar_rect,
+            )
+
         if show_debug:
             debug_rect = pygame.Rect(board_x, height_px - 44, 258, 30)
             pygame.draw.rect(screen, (16, 22, 30), debug_rect, border_radius=10)
@@ -2873,6 +3377,44 @@ def run_viewer() -> None:
             )
             tech_tree_node_rects = tech_tree_result.node_rects
             tech_tree_close_rect = tech_tree_result.close_rect
+
+        # ── Faction diplomacy banner (below the clicked faction bar) ─────────
+        faction_banner_btn_rects = []
+        faction_banner_close_rect = pygame.Rect(0, 0, 0, 0)
+        if selected_faction is not None and human_turn_active and env.winner() is None:
+            if selected_faction == "Blue":
+                _fb_rect = pygame.Rect(
+                    blue_bar_rect.right - 300, blue_bar_rect.bottom + 4, 300, 244,
+                )
+            else:
+                _fb_rect = pygame.Rect(
+                    red_bar_rect.left, red_bar_rect.bottom + 4, 300, 244,
+                )
+            faction_banner_btn_rects, faction_banner_close_rect = _draw_faction_diplomacy_banner(
+                _PANEL_DRAW_HELPERS, _PANEL_COLORS, screen,
+                font, small, tiny, board_assets,
+                env, current_faction, selected_faction, _fb_rect,
+            )
+
+        # ── Diplomacy modals (drawn on top of everything else) ────────────────
+        if diplomacy_modal is not None and diplomacy_modal_target is not None and human_turn_active:
+            if diplomacy_modal == "declare_war":
+                modal_rect = pygame.Rect(
+                    width_px // 2 - 240, height_px // 2 - 235, 480, 470,
+                )
+                diplomacy_confirm_rect, diplomacy_cancel_rect = _draw_declare_war_modal(
+                    _PANEL_DRAW_HELPERS, _PANEL_COLORS, screen, font, small, tiny,
+                    board_assets, env, current_faction, diplomacy_modal_target, modal_rect,
+                )
+            elif diplomacy_modal in ("offer_peace", "accept_peace"):
+                modal_rect = pygame.Rect(
+                    width_px // 2 - 240, height_px // 2 - 245, 480, 490,
+                )
+                diplomacy_confirm_rect, diplomacy_cancel_rect = _draw_peace_panel(
+                    _PANEL_DRAW_HELPERS, _PANEL_COLORS, screen, font, small, tiny,
+                    board_assets, env, current_faction, diplomacy_modal_target,
+                    diplomacy_modal, modal_rect,
+                )
 
         pygame.display.flip()
 

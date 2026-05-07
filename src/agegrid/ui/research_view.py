@@ -169,10 +169,40 @@ def _tech_unlock_summary(tech_id: str) -> str:
     return ", ".join(labels) if labels else "-"
 
 
+# Human-readable labels for tech passive modifiers shown in hover tooltips.
+_MODIFIER_LABELS: dict[str, str] = {
+    "base_attack_bonus":          "base attack",
+    "base_hp_bonus":              "base HP",
+    "soldier_hp_bonus":           "soldier HP",
+    "soldier_attack_bonus":       "soldier attack",
+    "archer_attack_bonus":        "archer attack",
+    "archer_range_bonus":         "archer range",
+    "cavalry_hp_bonus":           "cavalry HP",
+    "cavalry_attack_bonus":       "cavalry attack",
+    "cavalry_move_bonus":         "cavalry movement",
+    "building_hp_bonus":          "building HP",
+    "storehouse_income_bonus":    "storehouse income",
+    "quarry_income_bonus":        "quarry income",
+    "tower_damage_bonus":         "tower damage",
+    "tower_range_bonus":          "tower range",
+    "economy_income_bonus":       "economy building income",
+    "worker_gather_bonus":        "worker gather amount",
+    # Percentage modifiers — shown as "%" suffix
+    "passive_income_multiplier_pct":  "% economy income",
+    "building_cost_discount_pct":     "% building cost reduction",
+    "military_cost_discount_pct":     "% military cost reduction",
+}
+
+# Modifiers that are cost *reductions* (positive number = cheaper).
+_COST_REDUCTION_KEYS = {
+    "building_cost_discount_pct",
+    "military_cost_discount_pct",
+}
+
+
 def tech_detail_lines(env: AgeGridEnv, faction: str, tech_id: str) -> list[str]:
     state = env.faction_state(faction)
     definition = tech.TECH_DEFS[tech_id]
-    unlocks = _tech_unlock_summary(tech_id)
     lines = [
         f"Cost {definition.cost} | {definition.turns} turn{'s' if definition.turns != 1 else ''}",
         f"Status: {tech_status(env, faction, tech_id)}",
@@ -186,7 +216,27 @@ def tech_detail_lines(env: AgeGridEnv, faction: str, tech_id: str) -> list[str]:
             lines.append(f"Prereqs: {', '.join(tech_label(req) for req in definition.requires)}")
     else:
         lines.append("Prereqs: None")
-    lines.append(f"Unlocks: {unlocks}")
+
+    # Buildings and units unlocked (separated from passive bonuses)
+    unlock_parts: list[str] = []
+    for item in definition.unlock_buildings:
+        unlock_parts.append(_building_label(item))
+    for item in definition.unlock_units:
+        unlock_parts.append(UNIT_LABELS.get(item, item.replace("_", " ").title()))
+    lines.append(f"Unlocks: {', '.join(unlock_parts) if unlock_parts else '-'}")
+
+    # Passive modifiers as a dedicated bonus section (each on its own line)
+    for key, value in definition.passive_modifiers:
+        if value == 0:
+            continue
+        label = _MODIFIER_LABELS.get(key, key.replace("_", " "))
+        if key in _COST_REDUCTION_KEYS:
+            lines.append(f"  Bonus: -{value}% {label.replace('% ', '')}")
+        elif "%" in label:
+            lines.append(f"  Bonus: +{value}{label}")
+        else:
+            lines.append(f"  Bonus: +{value} {label}")
+
     if definition.summary:
         lines.append(f"Summary: {definition.summary}")
     return lines
@@ -478,24 +528,28 @@ def draw_tech_tree_overlay(
         node_rect = pygame.Rect(cx - NODE_HALF_W, cy - NODE_HALF_H, NODE_WIDTH, NODE_HEIGHT)
         node_rects[tech_id] = node_rect
 
-        red_status = tech_status(env, "Red", tech_id)
-        blue_status = tech_status(env, "Blue", tech_id)
-        focus_status = tech_status(env, focus_faction, tech_id)
-        unlocked_any = red_status == "Done" or blue_status == "Done"
-        ready_any = red_status == "Ready" or blue_status == "Ready"
-        active_any = red_status.startswith("Active") or blue_status.startswith("Active")
+        red_status   = tech_status(env, "Red",          tech_id)
+        blue_status  = tech_status(env, "Blue",         tech_id)
+        focus_status = tech_status(env, focus_faction,  tech_id)
 
-        node_fill = (122, 114, 102)
-        if unlocked_any:
-            node_fill = (106, 133, 92)
-        elif active_any:
-            node_fill = (102, 121, 150)
-        elif ready_any:
-            node_fill = (145, 121, 78)
+        # Node colour reflects the focus faction's state only.
+        # (Both factions' statuses are still shown in the R/B chips below.)
+        node_fill = (88, 83, 74)           # Locked  — dark grey
+        if focus_status == "Done":
+            node_fill = (76, 116, 76)      # Done    — muted green
+        elif focus_status.startswith("Active"):
+            node_fill = (72, 100, 148)     # Active  — muted blue
+        elif focus_status == "Ready":
+            node_fill = (148, 108, 44)     # Ready   — warm amber, clearly distinct from grey
 
-        node_border = (188, 168, 136)
-        if human_turn_active and focus_status == "Ready":
-            node_border = (240, 208, 148)
+        node_border = (150, 136, 110)      # default — muted brown
+        if focus_status == "Done":
+            node_border = (148, 196, 140)  # Done    — soft green border
+        elif focus_status.startswith("Active"):
+            node_border = (140, 176, 220)  # Active  — soft blue border
+        elif focus_status == "Ready":
+            # Bright gold border when it's the human's turn (clickable cue)
+            node_border = (240, 196, 88) if human_turn_active else (200, 162, 88)
         if node_rect.collidepoint(mouse_pos):
             node_border = (247, 236, 212)
             hovered_tech_id = tech_id
@@ -546,7 +600,7 @@ def draw_tech_tree_overlay(
     footer = f"Viewing {focus_faction} research state"
     helpers.draw_shadow_text(surface, body_font, footer, detail_inner.x + 8, detail_inner.bottom - 24, PARCH_MUTED, shadow=PARCH_SHADOW, shadow_offset=0)
 
-    legend = [("Done", (106, 133, 92)), ("Active", (102, 121, 150)), ("Ready", (145, 121, 78)), ("Locked", (122, 114, 102))]
+    legend = [("Done", (76, 116, 76)), ("Active", (72, 100, 148)), ("Ready", (148, 108, 44)), ("Locked", (88, 83, 74))]
     lx = outer.x + 12
     ly = outer.bottom - 28
     for label, color in legend:
